@@ -7,7 +7,7 @@ from ibapi.order_state import OrderState
 from ibapi.ticktype import TickType
 from ibapi.wrapper import *
 import time, threading
-port=7496
+port=7497
 
 class TestApp(EClient, EWrapper):
     def __init__(self):
@@ -54,17 +54,27 @@ if __name__ == "__main__":
     o.totalQuantity = 10
     o.orderType = "LMT"
     o.lmtPrice = 0.18
-    o.orderId = 27
 
     app = TestApp()
     app.connect("127.0.0.1", port, 0)
-    time.sleep(1)
-    threading.Thread(target=app.run).start()
-    time.sleep(1)
+    # start the socket loop in a separate thread
+    threading.Thread(target=app.run, daemon=True).start()
 
-    app.placeOrder(o.orderId, c, o)
+    # wait briefly for nextValidId from the gateway/TWS
+    timeout = 5.0
+    waited = 0.0
+    interval = 0.1
+    while app.oid == 0 and waited < timeout:
+        time.sleep(interval)
+        waited += interval
+
+    # get a unique order id from the app
+    order_id = app.nextOid()
+
+    # place the first order
+    app.placeOrder(order_id, c, o)
 
     time.sleep(3)
-    # c.secType = "EC"
+    # modify the limit price and resend using the same order id to replace the order
     o.lmtPrice = 0.20
-    app.placeOrder(o.orderId, c, o)
+    app.placeOrder(order_id, c, o)
