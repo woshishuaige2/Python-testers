@@ -72,6 +72,8 @@ class TradingAlgo(EClient, EWrapper):
         self.profit_target_price = {}  # track profit target price per symbol
         self.current_symbol = None  # track which symbol is being processed
         self.current_reqid = None  # track which request ID is being processed
+        self.vwap_cache = {}  # cached VWAP value per symbol
+        self.vwap_last_update = {}  # timestamp of last VWAP update per symbol
         
     def nextValidId(self, orderId: OrderId):
         self.oid = orderId
@@ -327,11 +329,11 @@ def detect_pullback_and_new_high(bars):
     
     Returns: (success, message, pullback_low_price)
     """
-    if len(bars) < 10:
+    if len(bars) < 30:
         return False, "Not enough bars", None
     
-    # Look at recent bars (last 20)
-    recent = bars[-20:] if len(bars) >= 20 else bars
+    # Look at recent bars (last 60 bars = 10 minutes for more significant patterns)
+    recent = bars[-60:] if len(bars) >= 60 else bars
     
     # Find the highest high in the period
     highs = [bar['high'] for bar in recent]
@@ -493,7 +495,31 @@ def check_and_trade(app, contract, symbol):
     
     # Don't check if already in position
     if app.in_position[symbol]:
-        return {"symbol": symbol, "status": "IN POSITION", "skip": True}
+        # Get current price for display
+        app.current_symbol = symbol
+        if symbol in app.last_price:
+            del app.last_price[symbol]
+        app.reqMktData(1, contract, "", False, False, [])
+        time.sleep(1)
+        app.cancelMktData(1)
+        
+        current_price = app.last_price.get(symbol, 0)
+        
+        # Return position details for display
+        entry = app.entry_price.get(symbol, 0)
+        stop = app.stop_price.get(symbol, 0)
+        profit = app.profit_target_price.get(symbol, 0)
+        qty = app.position.get(symbol, 0)
+        return {
+            "symbol": symbol, 
+            "status": "IN POSITION", 
+            "skip": True,
+            "price": current_price,
+            "entry_price": entry,
+            "stop_price": stop,
+            "profit_price": profit,
+            "quantity": qty
+        }
     
     # Check for stale pending orders (over 5 minutes old) and cancel them
     if app.pending_entry[symbol]:
@@ -521,32 +547,45 @@ def check_and_trade(app, contract, symbol):
     # Set current symbol for callbacks
     app.current_symbol = symbol
     
-    # Reset bars for fresh data
+    # Reset bars for fresh data (10-second bars only)
     if symbol in app.bars:
         app.bars[symbol] = []
-    if symbol in app.bars_1min:
-        app.bars_1min[symbol] = []
     
-    # Get historical data - 10 second bars for pattern/MACD/volume
+    # Get historical data - 10 second bars for pattern/MACD/volume (fast refresh)
     end_time = ""
     duration = "3600 S"  # 1 hour of data
     bar_size = "10 secs"
     app.reqHistoricalData(4001, contract, end_time, duration, bar_size, "TRADES", 1, 1, False, [])
     time.sleep(3)
     
-    # Get historical data - 1 minute bars for VWAP
-    duration_1min = "1 D"  # 1 day of data for VWAP
-    bar_size_1min = "1 min"
-    app.reqHistoricalData(4002, contract, end_time, duration_1min, bar_size_1min, "TRADES", 1, 1, False, [])
-    time.sleep(3)
-    
     if symbol not in app.bars or len(app.bars[symbol]) < 10:
         bars_count = len(app.bars.get(symbol, []))
         return {"symbol": symbol, "status": "INSUFFICIENT DATA", "bars": bars_count, "skip": True}
     
-    if symbol not in app.bars_1min or len(app.bars_1min[symbol]) < 10:
-        bars_count = len(app.bars_1min.get(symbol, []))
-        return {"symbol": symbol, "status": "INSUFFICIENT 1M DATA", "bars": bars_count, "skip": True}
+    # Check if we need to refresh VWAP (only every 60 seconds)
+    current_time = time.time()
+    need_vwap_refresh = True
+    
+    if symbol in app.vwap_last_update:
+        time_since_update = current_time - app.vwap_last_update[symbol]
+        if time_since_update < 60:  # Less than 60 seconds since last update
+            need_vwap_refresh = False
+    
+    # Get 1-minute bars for VWAP only if needed (slow refresh)
+    if need_vwap_refresh:
+        if symbol in app.bars_1min:
+            app.bars_1min[symbol] = []
+        
+        duration_1min = "1 D"  # 1 day of data for VWAP
+        bar_size_1min = "1 min"
+        app.reqHistoricalData(4002, contract, end_time, duration_1min, bar_size_1min, "TRADES", 1, 1, False, [])
+        time.sleep(3)
+        
+        if symbol not in app.bars_1min or len(app.bars_1min[symbol]) < 10:
+            bars_count = len(app.bars_1min.get(symbol, []))
+            return {"symbol": symbol, "status": "INSUFFICIENT 1M DATA", "bars": bars_count, "skip": True}
+        
+        app.vwap_last_update[symbol] = current_time
     
     # Get current ask price first for VWAP check
     if symbol in app.ask_price:
@@ -560,11 +599,26 @@ def check_and_trade(app, contract, symbol):
     
     current_price = app.ask_price[symbol]
     
-    # Check all conditions
+    # Check all conditions (pattern/MACD/volume use fresh 10-sec data)
     pattern_ok, pattern_msg, pullback_low_price = detect_pullback_and_new_high(app.bars[symbol])
     macd_ok, macd_msg = check_macd_positive(app.bars[symbol])
     volume_ok, volume_msg = check_volume_conditions(app.bars[symbol])
-    vwap_ok, vwap_msg = check_above_vwap(app.bars_1min[symbol], current_price)
+    
+    # VWAP check: use cached value if available, otherwise calculate fresh
+    if need_vwap_refresh:
+        vwap_ok, vwap_msg = check_above_vwap(app.bars_1min[symbol], current_price)
+        app.vwap_cache[symbol] = (vwap_ok, vwap_msg)  # Cache the result
+    else:
+        # Use cached VWAP result
+        if symbol in app.vwap_cache:
+            vwap_ok, vwap_msg = app.vwap_cache[symbol]
+        else:
+            # No cache yet, need to calculate
+            if symbol in app.bars_1min and len(app.bars_1min[symbol]) >= 10:
+                vwap_ok, vwap_msg = check_above_vwap(app.bars_1min[symbol], current_price)
+                app.vwap_cache[symbol] = (vwap_ok, vwap_msg)
+            else:
+                return {"symbol": symbol, "status": "NO VWAP DATA", "skip": True}
     
     # Return status for display
     result = {
@@ -922,16 +976,54 @@ if __name__ == "__main__":
             
             # Only update display if something changed or every 30 seconds
             if results_changed or (current_time - last_display_time > 30):
+                # Get update timestamp
+                est = timezone(timedelta(hours=-5))
+                now_est = datetime.now(est)
+                update_time_str = now_est.strftime('%H:%M:%S')
+                
                 # Clear screen and print header
                 os.system('cls' if os.name == 'nt' else 'clear')
                 print(f"{'='*70}")
-                print(f"  ROSS CAMERON MOMENTUM SCANNER  |  Scan #{scan_count}  |  {current_time_str} EST")
+                print(f"  ROSS CAMERON MOMENTUM SCANNER  |  Scan #{scan_count}  |  {update_time_str} EST")
                 print(f"{'='*70}")
-                print(f"  Account: ${app.account_balance:.2f}  |  Symbols: {', '.join(symbols)}")
+                print(f"  Account: ${app.account_balance:.2f} ")
                 print(f"{'='*70}\n")
                 
                 previous_results = current_results_hash
                 last_display_time = current_time
+                
+                # Display results table
+                if results:
+                    print(f"{'Symbol':<8} {'Price':<10} {'Pattern':<10} {'MACD':<8} {'Volume':<10} {'VWAP':<8} {'Status':<20}")
+                    print(f"{'-'*70}")
+                    
+                    for r in results:
+                        if r.get('skip'):
+                            status = r.get('status', 'SKIPPED')
+                            # If in position, show entry/stop/profit details
+                            if status == "IN POSITION":
+                                current = r.get('price', 0)
+                                entry = r.get('entry_price', 0)
+                                stop = r.get('stop_price', 0)
+                                profit = r.get('profit_price', 0)
+                                qty = r.get('quantity', 0)
+                                
+                                # Calculate P&L
+                                pnl = (current - entry) * qty if current > 0 and entry > 0 else 0
+                                pnl_pct = ((current - entry) / entry * 100) if entry > 0 and current > 0 else 0
+                                pnl_str = f"+${pnl:.2f} (+{pnl_pct:.1f}%)" if pnl >= 0 else f"-${abs(pnl):.2f} ({pnl_pct:.1f}%)"
+                                
+                                print(f"{r['symbol']:<8} IN POSITION - Last:${current:.2f} {pnl_str}")
+                                print(f"         Entry:${entry:.2f} | Stop:${stop:.2f} | Target:${profit:.2f} | Qty:{qty}")
+                            else:
+                                print(f"{r['symbol']:<8} {'-':<10} {'-':<10} {'-':<8} {'-':<10} {'-':<8} {status:<20}")
+                        else:
+                            price_str = f"${r.get('price', 0):.2f}"
+                            status = "✓ SIGNAL!" if r.get('all_pass') else "Waiting..."
+                            print(f"{r['symbol']:<8} {price_str:<10} {r.get('pattern', '-'):<10} {r.get('macd', '-'):<8} {r.get('volume', '-'):<10} {r.get('vwap', '-'):<8} {status:<20}")
+                    
+                    print(f"\n{'='*70}")
+                    print(f"Monitoring... (updates on change, Ctrl+C to stop)")
             
             # TRANSITION: Add stop loss orders for pre-market positions when regular hours begin
             if is_regular_hours():
@@ -1216,23 +1308,6 @@ if __name__ == "__main__":
                         if symbol in app.profit_target_price:
                             del app.profit_target_price[symbol]
                         time.sleep(2)
-            
-                # Display results table
-                if results:
-                    print(f"{'Symbol':<8} {'Price':<10} {'Pattern':<10} {'MACD':<8} {'Volume':<10} {'VWAP':<8} {'Status':<20}")
-                    print(f"{'-'*70}")
-                    
-                    for r in results:
-                        if r.get('skip'):
-                            status = r.get('status', 'SKIPPED')
-                            print(f"{r['symbol']:<8} {'-':<10} {'-':<10} {'-':<8} {'-':<10} {'-':<8} {status:<20}")
-                        else:
-                            price_str = f"${r.get('price', 0):.2f}"
-                            status = "✓ SIGNAL!" if r.get('all_pass') else "Waiting..."
-                            print(f"{r['symbol']:<8} {price_str:<10} {r.get('pattern', '-'):<10} {r.get('macd', '-'):<8} {r.get('volume', '-'):<10} {r.get('vwap', '-'):<8} {status:<20}")
-                    
-                    print(f"\n{'='*70}")
-                    print(f"Monitoring... (updates on change, Ctrl+C to stop)")
             
             # Wait 3 seconds before next check
             time.sleep(3)
