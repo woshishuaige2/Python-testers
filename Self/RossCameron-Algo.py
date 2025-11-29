@@ -2,6 +2,9 @@
 Ross Cameron Style Day Trading Algorithm
 ==========================================
 
+Strategy logic is imported from RossCameron-Strategy.py - any changes to strategy
+parameters will automatically apply to both live trading and backtesting.
+
 Entry Conditions (ALL must be met):
 - Pullback Pattern: Stock must show surge → pullback → first candle making new high after dip
 - MACD Positive: MACD line above signal line with positive histogram (12/26/9 periods)
@@ -44,6 +47,23 @@ import threading
 from datetime import datetime, timezone, timedelta
 import numpy as np
 import os
+import importlib.util
+
+# Import shared strategy logic (handle hyphen in filename)
+_strategy_path = os.path.join(os.path.dirname(__file__), 'RossCameron-Strategy.py')
+_spec = importlib.util.spec_from_file_location("strategy", _strategy_path)
+strategy = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(strategy)
+
+# Import strategy components
+StrategyConfig = strategy.StrategyConfig
+check_all_entry_conditions = strategy.check_all_entry_conditions
+check_dynamic_exit = strategy.check_dynamic_exit
+check_stop_loss_hit = strategy.check_stop_loss_hit
+check_profit_target_hit = strategy.check_profit_target_hit
+check_end_of_day = strategy.check_end_of_day
+calculate_position_size = strategy.calculate_position_size
+calculate_entry_exit_prices = strategy.calculate_entry_exit_prices
 
 # PAPER trading port
 port = 7497
@@ -247,237 +267,8 @@ def is_trading_hours():
 
 
 def is_near_close():
-    """Check if we're within 5 minutes of market close (3:30 PM EST)"""
-    est = timezone(timedelta(hours=-5))  # EST is UTC-5
-    now_est = datetime.now(est)
-    hour = now_est.hour
-    minute = now_est.minute
-    
-    # Close positions after 3:25 PM EST
-    if hour == 15 and minute >= 25:
-        return True
-    elif hour >= 16:
-        return True
-    return False
-
-
-def calculate_macd(closes, fast=12, slow=26, signal=9):
-    """Calculate MACD indicator"""
-    if len(closes) < slow:
-        return None, None, None
-    
-    closes_arr = np.array(closes)
-    
-    # Calculate EMAs
-    ema_fast = np.zeros(len(closes))
-    ema_slow = np.zeros(len(closes))
-    
-    # Simple start values
-    ema_fast[0] = closes_arr[0]
-    ema_slow[0] = closes_arr[0]
-    
-    alpha_fast = 2 / (fast + 1)
-    alpha_slow = 2 / (slow + 1)
-    
-    for i in range(1, len(closes)):
-        ema_fast[i] = closes_arr[i] * alpha_fast + ema_fast[i-1] * (1 - alpha_fast)
-        ema_slow[i] = closes_arr[i] * alpha_slow + ema_slow[i-1] * (1 - alpha_slow)
-    
-    macd_line = ema_fast - ema_slow
-    
-    # Calculate signal line
-    signal_line = np.zeros(len(macd_line))
-    signal_line[0] = macd_line[0]
-    alpha_signal = 2 / (signal + 1)
-    
-    for i in range(1, len(macd_line)):
-        signal_line[i] = macd_line[i] * alpha_signal + signal_line[i-1] * (1 - alpha_signal)
-    
-    histogram = macd_line - signal_line
-    
-    return macd_line[-1], signal_line[-1], histogram[-1]
-
-
-def check_macd_positive(bars):
-    """Check if MACD is positive (above signal line and not crossing down)"""
-    if len(bars) < 30:
-        return False, "Not enough data"
-    
-    closes = [bar['close'] for bar in bars]
-    macd, signal, histogram = calculate_macd(closes)
-    
-    if macd is None:
-        return False, "MACD calculation failed"
-    
-    # MACD must be above signal line
-    if macd <= signal:
-        return False, f"MACD negative: {macd:.4f} <= {signal:.4f}"
-    
-    # Check not crossing down (current histogram > 0)
-    if histogram <= 0:
-        return False, f"MACD crossing down: histogram={histogram:.4f}"
-    
-    return True, f"MACD positive: {macd:.4f} > {signal:.4f}, histogram={histogram:.4f}"
-
-
-def detect_pullback_and_new_high(bars):
-    """
-    Detect:
-    1. Initial surge (price went up significantly)
-    2. Pullback/dip occurred
-    3. First candle making new high after the dip
-    
-    Returns: (success, message, pullback_low_price)
-    """
-    if len(bars) < 30:
-        return False, "Not enough bars", None
-    
-    # Look at recent bars (last 60 bars = 10 minutes for more significant patterns)
-    recent = bars[-60:] if len(bars) >= 60 else bars
-    
-    # Find the highest high in the period
-    highs = [bar['high'] for bar in recent]
-    max_high = max(highs)
-    max_high_idx = len(recent) - 1 - highs[::-1].index(max_high)
-    
-    # Check if we had a pullback (price went down from max_high)
-    if max_high_idx >= len(recent) - 2:
-        return False, "No pullback detected yet (still at high)", None
-    
-    # Check bars after the high for pullback
-    pullback_detected = False
-    pullback_low = max_high
-    
-    for i in range(max_high_idx + 1, len(recent)):
-        if recent[i]['low'] < pullback_low:
-            pullback_low = recent[i]['low']
-            pullback_detected = True
-    
-    if not pullback_detected:
-        return False, "No pullback after surge", None
-    
-    # Check if the LAST bar is making a new high (breaking above previous resistance)
-    last_bar = recent[-1]
-    second_last_bar = recent[-2]
-    
-    # First candle making new high = current high > previous bar's high
-    if last_bar['high'] > second_last_bar['high'] and last_bar['close'] > last_bar['open']:
-        pullback_pct = ((max_high - pullback_low) / max_high) * 100
-        message = f"Pattern detected: surge to {max_high:.2f}, pullback to {pullback_low:.2f} (-{pullback_pct:.1f}%), new high at {last_bar['high']:.2f}"
-        return True, message, pullback_low  # Return the pullback low price as stop loss
-    
-    return False, "Waiting for first candle making new high", None
-
-
-def check_volume_conditions(bars):
-    """
-    Check:
-    1. No volume top (high volume with topping tail/wick)
-    2. No excessive selling pressure during pullback
-    """
-    if len(bars) < 5:
-        return False, "Not enough bars for volume analysis"
-    
-    recent = bars[-10:] if len(bars) >= 10 else bars
-    last_bar = recent[-1]
-    
-    # Calculate average volume
-    avg_volume = sum([bar['volume'] for bar in recent[:-1]]) / len(recent[:-1])
-    
-    # Check for volume top: high volume + long upper wick (topping tail)
-    upper_wick = last_bar['high'] - max(last_bar['open'], last_bar['close'])
-    body_size = abs(last_bar['close'] - last_bar['open'])
-    
-    if last_bar['volume'] > avg_volume * 2 and upper_wick > body_size * 1.5:
-        return False, f"Volume top detected: high volume ({last_bar['volume']:.0f} vs avg {avg_volume:.0f}) with topping tail"
-    
-    # Check selling pressure during pullback: red candles shouldn't dominate
-    red_candles = sum([1 for bar in recent[-5:] if bar['close'] < bar['open']])  
-    if red_candles >= 4:
-        return False, f"Excessive selling pressure: {red_candles}/5 red candles"
-    
-    return True, f"Volume OK: current={last_bar['volume']:.0f}, avg={avg_volume:.0f}, no topping pattern"
-
-
-def calculate_vwap(bars):
-    """
-    Calculate VWAP (Volume Weighted Average Price)
-    VWAP = Sum(Price * Volume) / Sum(Volume)
-    Using typical price: (High + Low + Close) / 3
-    """
-    if len(bars) < 2:
-        return None
-    
-    total_pv = 0.0
-    total_volume = 0.0
-    
-    for bar in bars:
-        typical_price = (bar['high'] + bar['low'] + bar['close']) / 3
-        pv = typical_price * bar['volume']
-        total_pv += pv
-        total_volume += bar['volume']
-    
-    if total_volume == 0:
-        return None
-    
-    vwap = total_pv / total_volume
-    return vwap
-
-
-def check_above_vwap(bars, current_price):
-    """
-    Check if current price is above VWAP
-    Only take long trades when above VWAP
-    """
-    vwap = calculate_vwap(bars)
-    
-    if vwap is None:
-        return False, "VWAP calculation failed"
-    
-    if current_price <= vwap:
-        return False, f"Price below VWAP: ${current_price:.4f} <= ${vwap:.4f} (no long entry)"
-    
-    pct_above = ((current_price - vwap) / vwap) * 100
-    return True, f"Price above VWAP: ${current_price:.4f} > ${vwap:.4f} (+{pct_above:.2f}%)"
-def calculate_position_size(account_balance, entry_price, stop_price, risk_pct=0.10):
-    """
-    Calculate position size for $500 account simulation:
-    - Use ~$200 per trade (40% of $500 account)
-    - Ignore actual account balance to simulate small account
-    """
-    if account_balance is None or account_balance <= 0:
-        return 0
-    
-    # Simulate $500 account with $200 per trade
-    simulated_trade_size = 200.0
-    
-    # Calculate shares based on entry price
-    shares = int(simulated_trade_size / entry_price)
-    
-    return max(shares, 1)  # minimum 1 share
-
-
-def check_dynamic_exit(app, symbol):
-    """
-    Check for Candle Under Candle exit signal
-    Exit if the latest completed bar's low is below the previous bar's low
-    
-    Returns: (should_exit, message)
-    """
-    if symbol not in app.bars or len(app.bars[symbol]) < 2:
-        return False, "Insufficient bar data for exit check"
-    
-    # Get the last two completed bars
-    bars = app.bars[symbol]
-    latest_bar = bars[-1]
-    previous_bar = bars[-2]
-    
-    # Check if latest bar's low is below previous bar's low (reversal signal)
-    if latest_bar['low'] < previous_bar['low']:
-        message = f"Candle Under Candle detected: Latest low ${latest_bar['low']:.2f} < Previous low ${previous_bar['low']:.2f}"
-        return True, message
-    
-    return False, f"No exit signal: Latest low ${latest_bar['low']:.2f} >= Previous low ${previous_bar['low']:.2f}"
+    """Check if we're within 5 minutes of market close (wrapper for shared strategy)"""
+    return check_end_of_day()
 
 
 def check_and_trade(app, contract, symbol):
@@ -599,26 +390,23 @@ def check_and_trade(app, contract, symbol):
     
     current_price = app.ask_price[symbol]
     
-    # Check all conditions (pattern/MACD/volume use fresh 10-sec data)
-    pattern_ok, pattern_msg, pullback_low_price = detect_pullback_and_new_high(app.bars[symbol])
-    macd_ok, macd_msg = check_macd_positive(app.bars[symbol])
-    volume_ok, volume_msg = check_volume_conditions(app.bars[symbol])
+    # Check all entry conditions using shared strategy module
+    all_ok, results, pullback_low_price = check_all_entry_conditions(
+        app.bars[symbol], 
+        app.bars_1min[symbol], 
+        current_price
+    )
     
-    # VWAP check: use cached value if available, otherwise calculate fresh
-    if need_vwap_refresh:
-        vwap_ok, vwap_msg = check_above_vwap(app.bars_1min[symbol], current_price)
-        app.vwap_cache[symbol] = (vwap_ok, vwap_msg)  # Cache the result
-    else:
-        # Use cached VWAP result
-        if symbol in app.vwap_cache:
-            vwap_ok, vwap_msg = app.vwap_cache[symbol]
-        else:
-            # No cache yet, need to calculate
-            if symbol in app.bars_1min and len(app.bars_1min[symbol]) >= 10:
-                vwap_ok, vwap_msg = check_above_vwap(app.bars_1min[symbol], current_price)
-                app.vwap_cache[symbol] = (vwap_ok, vwap_msg)
-            else:
-                return {"symbol": symbol, "status": "NO VWAP DATA", "skip": True}
+    # Extract individual results for display
+    pattern_ok = results.get('pattern', (False, ""))[0]
+    pattern_msg = results.get('pattern', (False, ""))[1]
+    macd_ok = results.get('macd', (False, ""))[0]
+    macd_msg = results.get('macd', (False, ""))[1]
+    volume_ok = results.get('volume', (False, ""))[0]
+    volume_msg = results.get('volume', (False, ""))[1]
+    vwap_ok = results.get('vwap', (False, ""))[0]
+    vwap_msg = results.get('vwap', (False, ""))[1]
+
     
     # Return status for display
     result = {
@@ -665,15 +453,11 @@ def check_and_trade(app, contract, symbol):
         result["skip"] = True
         return result
     
-    # Use ask price + small buffer for limit order to ensure fill
-    entry_price = round(app.ask_price[symbol] * 1.002, 2)
-    
-    # Use pullback low as stop loss
-    stop_price = round(pullback_low_price, 2)
-    
-    # Profit target: +10% from entry
-    profit_pct = 0.10
-    profit_price = round(entry_price * (1 + profit_pct), 2)
+    # Calculate entry/exit prices using shared strategy module
+    entry_price, stop_price, profit_price = calculate_entry_exit_prices(
+        app.ask_price[symbol], 
+        pullback_low_price
+    )
     
     # Calculate actual risk percentage
     risk_per_share = entry_price - stop_price
@@ -685,7 +469,8 @@ def check_and_trade(app, contract, symbol):
     
     stop_pct_actual = (risk_per_share / entry_price) * 100
     
-    qty = calculate_position_size(app.account_balance, entry_price, stop_price, risk_pct=0.10)
+    qty = calculate_position_size(app.account_balance, entry_price, stop_price)
+
     
     # Validate position size
     if qty <= 0:
@@ -699,7 +484,7 @@ def check_and_trade(app, contract, symbol):
     risk_pct_actual = (risk_dollars / app.account_balance) * 100
     
     print(f"Trade Plan:")
-    print(f"  Entry: ${entry_price} | Stop: ${stop_price} (pullback low, -{stop_pct_actual:.1f}%) | Target: ${profit_price} (+{profit_pct*100:.0f}%)")
+    print(f"  Entry: ${entry_price} | Stop: ${stop_price} (pullback low, -{stop_pct_actual:.1f}%) | Target: ${profit_price} (+{StrategyConfig.PROFIT_TARGET_PCT*100:.0f}%)")
     print(f"  Quantity: {qty} shares | Notional: ${notional:.2f} | Risk: ${risk_dollars:.2f} ({risk_pct_actual:.1f}%)\n")
     
     # Check if pre-market hours
@@ -1231,8 +1016,8 @@ if __name__ == "__main__":
                                 time.sleep(2)
                                 continue
                     
-                    # Check for dynamic exit signal (Candle Under Candle)
-                    should_exit, exit_msg = check_dynamic_exit(app, symbol)
+                    # Check for dynamic exit signal (Candle Under Candle) using shared strategy module
+                    should_exit, exit_msg = check_dynamic_exit(app.bars.get(symbol, []))
                     
                     if should_exit and app.position.get(symbol, 0) > 0:
                         timestamp = datetime.now().strftime('%H:%M:%S')
