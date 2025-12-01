@@ -450,7 +450,7 @@ class BacktestEngine:
                 max_dd = dd
         
         print(f"Total Trades: {total_trades}")
-        print(f"Winning Trades: {len(winning_trades)} ({win_rate:.1f}%)")
+        print(f"Winning Trades: {len(winning_trades)} ({len(winning_trades)/total_trades*100:.1f}%)" if total_trades > 0 else "Winning Trades: 0 (0.0%)")
         print(f"Losing Trades: {len(losing_trades)}")
         print(f"\nP&L:")
         print(f"  Total: ${total_pnl:+.2f} ({total_return_pct:+.2f}%)")

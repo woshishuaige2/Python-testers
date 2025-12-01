@@ -63,12 +63,12 @@ class StrategyConfig:
     SEC_FEE_PER_DOLLAR = 0.0000278    # SEC fee on sells (~$0.0278 per $1000)
     
     # Profit/Loss Targets
-    PROFIT_TARGET_PCT = 0.15          # 10% profit target
+    PROFIT_TARGET_PCT = 0.15          # 15% profit target
     ENTRY_SPREAD_PCT = 0.002          # 0.2% spread simulation for entry
     
     # Exit Timing
     END_OF_DAY_HOUR = 15              # 3 PM
-    END_OF_DAY_MINUTE = 25            # 3:25 PM
+    END_OF_DAY_MINUTE = 50            # 3:50 PM
     
     # VWAP Lookback
     VWAP_LOOKBACK_BARS = 390          # Full day of 1-min bars
