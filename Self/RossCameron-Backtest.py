@@ -163,7 +163,8 @@ def fetch_historical_data_ibkr(symbol, start_date, end_date, bar_size="10 secs")
     
     # Format end datetime with Eastern timezone (YYYYMMDD HH:MM:SS TZ format with spaces)
     end_datetime = end.strftime("%Y%m%d 23:59:59 US/Eastern")
-    app.reqHistoricalData(1, contract, end_datetime, duration, bar_size, "TRADES", 1, 1, False, [])
+    # Use RTH=0 to include pre-market and after-hours data
+    app.reqHistoricalData(1, contract, end_datetime, duration, bar_size, "TRADES", 0, 1, False, [])
     
     # Wait for data
     timeout = 30
@@ -202,14 +203,14 @@ class BacktestEngine:
         Returns: (should_enter, entry_price, stop_price, profit_price, shares)
         """
         # Need sufficient data
-        if len(bars_10s) < 30 or len(bars_1m) < 10:
+        if len(bars_1m) < 10:
             return False, None, None, None, None
         
-        # Get current price (use close of current bar as "current price")
+        # Get current price (use close of current 10-sec bar as "current price")
         current_price = bars_10s[-1]['close']
         
-        # Check all conditions using shared strategy module
-        all_ok, results, pullback_low = check_all_entry_conditions(bars_10s, bars_1m, current_price)
+        # Check all conditions using 1-min bars for pattern detection
+        all_ok, results, pullback_low = check_all_entry_conditions(bars_1m, current_price)
         
         if not all_ok or pullback_low is None:
             return False, None, None, None, None
@@ -370,17 +371,21 @@ class BacktestEngine:
             current_bar = bars_10s_list[i]
             current_time = current_bar['date']
             
-            # Skip pre-market (before 9:30 AM) and after hours (after 3:30 PM)
-            if current_time.hour < 9 or (current_time.hour == 9 and current_time.minute < 30):
-                continue
-            if current_time.hour > 15 or (current_time.hour == 15 and current_time.minute > 30):
+            # Skip after hours (after 4:00 PM) - include pre-market
+            if current_time.hour >= 16:
                 continue
             
             # Get recent bars for analysis
             recent_10s = bars_10s_list[i-lookback_bars:i+1]
             
-            # Get 1-min bars up to current time
-            recent_1m = [b for b in bars_1m_list if b['date'] <= current_time][-lookback_1m:]
+            # Get 1-min bars for VWAP: Use session VWAP from 9:30 AM onwards (ignore pre-market)
+            market_open_time = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
+            if current_time.hour < 9 or (current_time.hour == 9 and current_time.minute < 30):
+                # Pre-market: use only pre-market bars
+                recent_1m = [b for b in bars_1m_list if b['date'] <= current_time][-lookback_1m:]
+            else:
+                # Regular hours: use only bars from 9:30 AM onwards for session VWAP
+                recent_1m = [b for b in bars_1m_list if b['date'] >= market_open_time and b['date'] <= current_time]
             
             # Check exit conditions first
             if self.position is not None:
@@ -481,11 +486,13 @@ def main():
     print("="*70)
     print(get_strategy_summary())
     
-    # User inputs
-    symbol = input("\nEnter stock symbol (e.g., LOBO, AAPL): ").strip().upper()
-    if not symbol:
+    # User inputs - allow up to 3 symbols
+    symbols_input = input("\nEnter stock symbols (up to 3, comma-separated, e.g., AAPL, TSLA, NVDA): ").strip().upper()
+    if not symbols_input:
         print("ERROR: Symbol cannot be empty.")
         return
+    
+    symbols = [s.strip() for s in symbols_input.split(',')][:3]  # Limit to 3 symbols
     
     start_date = input("Enter start date (YYYY-MM-DD): ").strip()
     end_date = input("Enter end date (YYYY-MM-DD): ").strip()
@@ -514,25 +521,98 @@ def main():
     print("Note: Ensure TWS/Gateway is running on port 7497")
     print("="*70)
     
-    # Fetch data from IBKR
-    df_10s = fetch_historical_data_ibkr(symbol, start_date, end_date, bar_size="10 secs")
-    df_1m = fetch_historical_data_ibkr(symbol, start_date, end_date, bar_size="1 min")
+    # Run backtest for each symbol
+    all_trades = []
+    combined_engine = BacktestEngine(initial_capital=500.0)
     
-    if df_10s.empty or df_1m.empty:
-        print("\nERROR: Could not fetch data. Exiting.")
-        return
+    for symbol in symbols:
+        print(f"\n{'='*70}")
+        print(f"BACKTESTING: {symbol}")
+        print(f"{'='*70}")
+        
+        # Fetch data from IBKR
+        df_10s = fetch_historical_data_ibkr(symbol, start_date, end_date, bar_size="10 secs")
+        df_1m = fetch_historical_data_ibkr(symbol, start_date, end_date, bar_size="1 min")
+        
+        if df_10s.empty or df_1m.empty:
+            print(f"\nWARNING: Could not fetch data for {symbol}. Skipping.")
+            continue
+        
+        # Run backtest for this symbol
+        engine = BacktestEngine(initial_capital=500.0)
+        engine.run_backtest(df_10s, df_1m, symbol, start_date, end_date)
+        
+        # Add symbol to trades and aggregate
+        for trade in engine.trades:
+            trade['symbol'] = symbol
+            all_trades.append(trade)
     
-    # Run backtest
-    engine = BacktestEngine(initial_capital=500.0)
-    engine.run_backtest(df_10s, df_1m, symbol, start_date, end_date)
+    # Show combined results if multiple symbols
+    if len(symbols) > 1 and all_trades:
+        print("\n" + "="*70)
+        print("COMBINED RESULTS - ALL SYMBOLS")
+        print("="*70)
+        
+        total_trades = len(all_trades)
+        winning_trades = [t for t in all_trades if t['pnl'] > 0]
+        losing_trades = [t for t in all_trades if t['pnl'] <= 0]
+        
+        total_pnl = sum([t['pnl'] for t in all_trades])
+        avg_pnl = total_pnl / total_trades if total_trades > 0 else 0
+        avg_win = sum([t['pnl'] for t in winning_trades]) / len(winning_trades) if winning_trades else 0
+        avg_loss = sum([t['pnl'] for t in losing_trades]) / len(losing_trades) if losing_trades else 0
+        
+        profit_factor = abs(sum([t['pnl'] for t in winning_trades]) / sum([t['pnl'] for t in losing_trades])) if losing_trades and sum([t['pnl'] for t in losing_trades]) != 0 else float('inf')
+        
+        final_capital = 500.0 + total_pnl
+        total_return_pct = (total_pnl / 500.0) * 100
+        
+        print(f"\nTotal Trades: {total_trades}")
+        print(f"Winning Trades: {len(winning_trades)} ({len(winning_trades)/total_trades*100:.1f}%)" if total_trades > 0 else "Winning Trades: 0 (0.0%)")
+        print(f"Losing Trades: {len(losing_trades)}")
+        print(f"\nP&L:")
+        print(f"  Total: ${total_pnl:+.2f} ({total_return_pct:+.2f}%)")
+        print(f"  Average per trade: ${avg_pnl:+.2f}")
+        print(f"  Average winner: ${avg_win:+.2f}")
+        print(f"  Average loser: ${avg_loss:+.2f}")
+        print(f"\nRisk Metrics:")
+        print(f"  Profit Factor: {profit_factor:.2f}")
+        print(f"\nFinal Capital: ${final_capital:.2f}")
+        print(f"{'='*70}\n")
+        
+        # Show breakdown by symbol
+        print("Breakdown by Symbol:")
+        print(f"{'Symbol':<10} {'Trades':<10} {'Win Rate':<12} {'Total P&L':<15} {'Avg P&L':<10}")
+        print(f"{'-'*70}")
+        for symbol in symbols:
+            symbol_trades = [t for t in all_trades if t['symbol'] == symbol]
+            if not symbol_trades:
+                continue
+            symbol_winners = [t for t in symbol_trades if t['pnl'] > 0]
+            symbol_pnl = sum([t['pnl'] for t in symbol_trades])
+            symbol_avg = symbol_pnl / len(symbol_trades)
+            win_rate = len(symbol_winners) / len(symbol_trades) * 100 if symbol_trades else 0
+            print(f"{symbol:<10} {len(symbol_trades):<10} {win_rate:<11.1f}% ${symbol_pnl:<14.2f} ${symbol_avg:<9.2f}")
+        print(f"{'='*70}\n")
+        
+        # Print all trades combined
+        print("All Trade Details:")
+        print(f"{'#':<4} {'Symbol':<8} {'Entry Time':<20} {'Exit Time':<20} {'Entry $':<10} {'Exit $':<10} {'P&L $':<10} {'P&L %':<10} {'Reason':<20}")
+        print(f"{'-'*150}")
+        for i, trade in enumerate(all_trades, 1):
+            print(f"{i:<4} {trade['symbol']:<8} {str(trade['entry_time']):<20} {str(trade['exit_time']):<20} "
+                  f"${trade['entry_price']:<9.2f} ${trade['exit_price']:<9.2f} "
+                  f"${trade['pnl']:<9.2f} {trade['pnl_pct']:<9.2f}% {trade['exit_reason']:<20}")
+        print(f"{'='*70}\n")
     
     # Save results
-    save = input("\nSave results to CSV? (y/n): ").strip().lower()
-    if save == 'y':
-        results_df = pd.DataFrame(engine.trades)
-        filename = f"backtest_{symbol}_{start_date}_{end_date}.csv"
-        results_df.to_csv(filename, index=False)
-        print(f"✓ Results saved to {filename}")
+    if all_trades:
+        save = input("\nSave results to CSV? (y/n): ").strip().lower()
+        if save == 'y':
+            results_df = pd.DataFrame(all_trades)
+            filename = f"backtest_{'_'.join(symbols)}_{start_date}_{end_date}.csv"
+            results_df.to_csv(filename, index=False)
+            print(f"✓ Results saved to {filename}")
 
 
 if __name__ == "__main__":

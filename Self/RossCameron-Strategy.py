@@ -13,17 +13,17 @@ Strategy Rules:
 ===============
 
 ENTRY CONDITIONS (ALL must be met):
-- Pullback Pattern: Surge → pullback → first candle making new high after dip
+- Pullback Pattern: Surge → pullback → first candle making new high after dip (1-MIN BARS)
 - MACD Positive: MACD line above signal line with positive histogram (12/26/9)
 - Volume Confirmation: No volume topping, less than 4/5 red candles during pullback
-- VWAP Filter: Price must be above VWAP (long trades only)
-- Risk Management: Position sized to risk max 10% of account ($200 per trade on $500 account)
+- VWAP Filter: Price must be above session VWAP (from 9:30 AM)
+- Minimum Pullback: 3% retracement required to filter noise
 
 EXIT CONDITIONS:
 - Dynamic Exit: Candle Under Candle reversal (latest bar's low < previous bar's low)
-- Stop Loss: Structural stop at pullback low price
-- Profit Target: +10% from entry price
-- End of Day: Close all positions at 3:25 PM EST
+- Stop Loss: Structural stop at pullback low with 1% buffer, minimum 2% distance
+- Profit Target: +8% from entry price
+- End of Day: Close all positions at 3:50 PM EST
 
 CONFIGURATION:
 ==============
@@ -71,7 +71,7 @@ class StrategyConfig:
     END_OF_DAY_MINUTE = 50            # 3:50 PM
     
     # VWAP Lookback
-    VWAP_LOOKBACK_BARS = 390          # Full day of 1-min bars
+    VWAP_LOOKBACK_BARS = 390          # Session VWAP (from 9:30 AM market open)
 
 
 # ==================== INDICATOR CALCULATIONS ====================
@@ -299,21 +299,20 @@ def check_above_vwap(bars, current_price):
     return True, f"Price above VWAP: ${current_price:.4f} > ${vwap:.4f} (+{pct_above:.2f}%)"
 
 
-def check_all_entry_conditions(bars_10s, bars_1m, current_price):
+def check_all_entry_conditions(bars_1m, current_price):
     """
     Check ALL entry conditions at once
     
     Parameters:
-    - bars_10s: List of 10-second bars for pattern/MACD/volume
-    - bars_1m: List of 1-minute bars for VWAP
+    - bars_1m: List of 1-minute bars for pattern/MACD/volume/VWAP
     - current_price: Current price
     
     Returns: (bool, dict, float) - (all_conditions_met, condition_results, pullback_low)
     """
-    # Check each condition
-    pattern_ok, pattern_msg, pullback_low = detect_pullback_and_new_high(bars_10s)
-    macd_ok, macd_msg = check_macd_positive(bars_10s)
-    volume_ok, volume_msg = check_volume_conditions(bars_10s)
+    # Check each condition (all using 1-min bars now)
+    pattern_ok, pattern_msg, pullback_low = detect_pullback_and_new_high(bars_1m)
+    macd_ok, macd_msg = check_macd_positive(bars_1m)
+    volume_ok, volume_msg = check_volume_conditions(bars_1m)
     vwap_ok, vwap_msg = check_above_vwap(bars_1m, current_price)
     
     # Compile results
@@ -457,14 +456,15 @@ def calculate_entry_exit_prices(current_price, pullback_low):
     # Entry price: add spread
     entry_price = round(current_price * (1 + StrategyConfig.ENTRY_SPREAD_PCT), 2)
     
-    # Stop loss: pullback low
-    stop_price = round(pullback_low, 2)
+    # Stop loss: pullback low with 1% buffer to avoid premature stops
+    stop_price = round(pullback_low * 0.99, 2)
     
     # Profit target: % gain from entry
     profit_price = round(entry_price * (1 + StrategyConfig.PROFIT_TARGET_PCT), 2)
     
-    # Validate stop loss
-    if stop_price >= entry_price:
+    # Validate stop loss (ensure at least 2% distance)
+    stop_distance_pct = (entry_price - stop_price) / entry_price
+    if stop_price >= entry_price or stop_distance_pct < 0.02:
         return None, None, None
     
     return entry_price, stop_price, profit_price
