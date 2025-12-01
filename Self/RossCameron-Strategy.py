@@ -43,9 +43,8 @@ class StrategyConfig:
     MACD_SIGNAL = 9
     
     # Pattern Detection
-    PATTERN_LOOKBACK_BARS = 90  # How many bars to look back for pattern (10 mins for 10-sec bars)
-
-    MIN_BARS_FOR_PATTERN = 30   # Minimum bars needed
+    PATTERN_LOOKBACK_BARS = 30   # 30 minutes of 1-min bars for pattern detection
+    MIN_BARS_FOR_PATTERN = 10    # Minimum bars needed for pattern analysis
     
     # Volume Analysis
     VOLUME_SPIKE_THRESHOLD = 2.0     # Volume must be < 2x average to avoid topping
@@ -63,8 +62,9 @@ class StrategyConfig:
     SEC_FEE_PER_DOLLAR = 0.0000278    # SEC fee on sells (~$0.0278 per $1000)
     
     # Profit/Loss Targets
-    PROFIT_TARGET_PCT = 0.15          # 15% profit target
+    PROFIT_TARGET_PCT = 0.08          # 8% profit target
     ENTRY_SPREAD_PCT = 0.002          # 0.2% spread simulation for entry
+    MIN_PULLBACK_PCT = 3.0            # 3% minimum pullback requirement
     
     # Exit Timing
     END_OF_DAY_HOUR = 15              # 3 PM
@@ -72,6 +72,16 @@ class StrategyConfig:
     
     # VWAP Lookback
     VWAP_LOOKBACK_BARS = 390          # Session VWAP (from 9:30 AM market open)
+    
+    # Live Trading Data Fetching
+    DATA_DURATION_10SEC = "3600 S"    # 1 hour of 10-second bars for exit monitoring
+    DATA_DURATION_1MIN = "1 D"        # 1 day of 1-minute bars for pattern/VWAP
+    BAR_SIZE_10SEC = "10 secs"
+    BAR_SIZE_1MIN = "1 min"
+    
+    # Live Trading Account (uses real IBKR account balance, these are defaults)
+    DEFAULT_ACCOUNT_BALANCE = 10000.0  # Default if API doesn't return balance
+    MAX_CONCURRENT_POSITIONS = 3       # Maximum number of symbols to trade simultaneously
 
 
 # ==================== INDICATOR CALCULATIONS ====================
@@ -235,6 +245,11 @@ def detect_pullback_and_new_high(bars):
     # First candle making new high = current high > previous bar's high
     if last_bar['high'] > second_last_bar['high'] and last_bar['close'] > last_bar['open']:
         pullback_pct = ((max_high - pullback_low) / max_high) * 100
+        
+        # Validate minimum pullback requirement
+        if pullback_pct < StrategyConfig.MIN_PULLBACK_PCT:
+            return False, f"Pullback too shallow: {pullback_pct:.1f}% < {StrategyConfig.MIN_PULLBACK_PCT}% minimum", None
+        
         message = f"Pattern detected: surge to {max_high:.2f}, pullback to {pullback_low:.2f} (-{pullback_pct:.1f}%), new high at {last_bar['high']:.2f}"
         return True, message, pullback_low  # Return the pullback low price as stop loss
     

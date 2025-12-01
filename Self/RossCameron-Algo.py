@@ -86,7 +86,7 @@ class TradingAlgo(EClient, EWrapper):
         self.in_position = {}  # bool per symbol
         self.pending_entry = {}  # bool per symbol
         self.pending_entry_time = {}  # timestamp when pending entry was set
-        self.premarket_entry = {}  # track if position entered during pre-market
+        self.premarket_entry = {}  # track if position entered during pre-market (initialized per symbol)
         self.entry_price = {}  # track actual entry price per symbol
         self.stop_price = {}  # track stop loss price per symbol
         self.profit_target_price = {}  # track profit target price per symbol
@@ -113,12 +113,23 @@ class TradingAlgo(EClient, EWrapper):
     def historicalData(self, reqId: int, bar):
         """Receive historical bars - 10-sec for patterns/MACD/volume, 1-min for VWAP"""
         if self.current_symbol:
+            # Parse bar.date string to datetime object
+            # IBKR returns format: "20231201 09:30:00" or "20231201  09:30:00" (US/Eastern)
+            try:
+                bar_date = datetime.strptime(bar.date.strip(), '%Y%m%d %H:%M:%S')
+            except ValueError:
+                try:
+                    bar_date = datetime.strptime(bar.date.strip(), '%Y%m%d  %H:%M:%S')
+                except ValueError:
+                    # Fallback: already datetime or other format
+                    bar_date = bar.date if isinstance(bar.date, datetime) else datetime.now()
+            
             # reqId 4001 = 10-second bars, reqId 4002 = 1-minute bars
             if reqId == 4001:
                 if self.current_symbol not in self.bars:
                     self.bars[self.current_symbol] = []
                 self.bars[self.current_symbol].append({
-                    'date': bar.date,
+                    'date': bar_date,
                     'open': bar.open,
                     'high': bar.high,
                     'low': bar.low,
@@ -129,7 +140,7 @@ class TradingAlgo(EClient, EWrapper):
                 if self.current_symbol not in self.bars_1min:
                     self.bars_1min[self.current_symbol] = []
                 self.bars_1min[self.current_symbol].append({
-                    'date': bar.date,
+                    'date': bar_date,
                     'open': bar.open,
                     'high': bar.high,
                     'low': bar.low,
@@ -268,7 +279,9 @@ def is_trading_hours():
 
 def is_near_close():
     """Check if we're within 5 minutes of market close (wrapper for shared strategy)"""
-    return check_end_of_day()
+    est = timezone(timedelta(hours=-5))
+    now_est = datetime.now(est)
+    return check_end_of_day(now_est)
 
 
 def check_and_trade(app, contract, symbol):
@@ -344,8 +357,8 @@ def check_and_trade(app, contract, symbol):
     
     # Get historical data - 10 second bars for pattern/MACD/volume (fast refresh)
     end_time = ""
-    duration = "3600 S"  # 1 hour of data
-    bar_size = "10 secs"
+    duration = StrategyConfig.DATA_DURATION_10SEC
+    bar_size = StrategyConfig.BAR_SIZE_10SEC
     app.reqHistoricalData(4001, contract, end_time, duration, bar_size, "TRADES", 1, 1, False, [])
     time.sleep(3)
     
@@ -367,8 +380,8 @@ def check_and_trade(app, contract, symbol):
         if symbol in app.bars_1min:
             app.bars_1min[symbol] = []
         
-        duration_1min = "1 D"  # 1 day of data for VWAP
-        bar_size_1min = "1 min"
+        duration_1min = StrategyConfig.DATA_DURATION_1MIN
+        bar_size_1min = StrategyConfig.BAR_SIZE_1MIN
         app.reqHistoricalData(4002, contract, end_time, duration_1min, bar_size_1min, "TRADES", 1, 1, False, [])
         time.sleep(3)
         
@@ -390,10 +403,28 @@ def check_and_trade(app, contract, symbol):
     
     current_price = app.ask_price[symbol]
     
-    # Check all entry conditions using shared strategy module
+    # Filter 1-min bars for session VWAP (same logic as backtest)
+    est = timezone(timedelta(hours=-5))
+    now_est = datetime.now(est)
+    market_open = now_est.replace(hour=9, minute=30, second=0, microsecond=0)
+    
+    # Validate bars have datetime objects (should be set in historicalData callback)
+    if not all(isinstance(b.get('date'), datetime) for b in app.bars_1min[symbol]):
+        return {"symbol": symbol, "status": "INVALID BAR DATES", "skip": True}
+    
+    if now_est.hour < 9 or (now_est.hour == 9 and now_est.minute < 30):
+        # Pre-market: use all available pre-market bars (before 9:30 AM)
+        filtered_bars_1m = [b for b in app.bars_1min[symbol] if b['date'].hour < 9 or (b['date'].hour == 9 and b['date'].minute < 30)]
+    else:
+        # Regular hours: use only bars from 9:30 AM onwards for session VWAP
+        filtered_bars_1m = [b for b in app.bars_1min[symbol] if b['date'].hour > 9 or (b['date'].hour == 9 and b['date'].minute >= 30)]
+    
+    if len(filtered_bars_1m) < 10:
+        return {"symbol": symbol, "status": "INSUFFICIENT SESSION DATA", "bars": len(filtered_bars_1m), "skip": True}
+    
+    # Check all entry conditions using shared strategy module (filtered 1-min bars only)
     all_ok, results, pullback_low_price = check_all_entry_conditions(
-        app.bars[symbol], 
-        app.bars_1min[symbol], 
+        filtered_bars_1m, 
         current_price
     )
     
@@ -634,7 +665,7 @@ if __name__ == "__main__":
     
     if app.account_balance is None:
         print("Warning: Could not retrieve account balance. Using default risk management.")
-        app.account_balance = 10000.0
+        app.account_balance = StrategyConfig.DEFAULT_ACCOUNT_BALANCE
     else:
         print(f"Account balance: ${app.account_balance:.2f}\n")
     
@@ -921,8 +952,8 @@ if __name__ == "__main__":
                         app.bars[symbol] = []
                     
                     end_time = ""
-                    duration = "3600 S"
-                    bar_size = "10 secs"
+                    duration = StrategyConfig.DATA_DURATION_10SEC
+                    bar_size = StrategyConfig.BAR_SIZE_10SEC
                     app.reqHistoricalData(4001, contracts[symbol], end_time, duration, bar_size, "TRADES", 1, 1, False, [])
                     time.sleep(3)
                     
@@ -1066,12 +1097,12 @@ if __name__ == "__main__":
                             exit_order.action = "SELL"
                             exit_order.orderType = "MKT"
                             exit_order.totalQuantity = app.position[symbol]
-                        exit_order.tif = "DAY"
-                        
-                        exit_id = app.nextOid()
-                        exit_order.orderId = exit_id
-                        app.placeOrder(exit_order.orderId, contracts[symbol], exit_order)
-                        print(f"Market exit order placed: {app.position[symbol]} shares @ MKT")
+                            exit_order.tif = "DAY"
+                            
+                            exit_id = app.nextOid()
+                            exit_order.orderId = exit_id
+                            app.placeOrder(exit_order.orderId, contracts[symbol], exit_order)
+                            print(f"Market exit order placed: {app.position[symbol]} shares @ MKT")
                         print(f"{'='*70}\n")
                         
                         # Update position tracking AFTER order is placed
