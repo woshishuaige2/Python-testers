@@ -62,7 +62,7 @@ class StrategyConfig:
     SEC_FEE_PER_DOLLAR = 0.0000278    # SEC fee on sells (~$0.0278 per $1000)
     
     # Profit/Loss Targets
-    PROFIT_TARGET_PCT = 0.08          # 8% profit target
+    PROFIT_TARGET_PCT = 0.2          # 20% profit target
     ENTRY_SPREAD_PCT = 0.002          # 0.2% spread simulation for entry
     MIN_PULLBACK_PCT = 3.0            # 3% minimum pullback requirement
     
