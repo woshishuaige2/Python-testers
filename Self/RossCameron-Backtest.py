@@ -515,23 +515,17 @@ def main():
     
     symbols = [s.strip() for s in symbols_input.split(',')][:3]  # Limit to 3 symbols
     
-    start_date = input("Enter start date (YYYY-MM-DD): ").strip()
-    end_date = input("Enter end date (YYYY-MM-DD): ").strip()
+    trade_date = input("Enter trading date (YYYY-MM-DD): ").strip()
     
     # Validate date format
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        date_dt = datetime.strptime(trade_date, "%Y-%m-%d")
         
-        # Check if dates are reasonable
-        if start_dt.year > 2025:
-            confirm = input(f"WARNING: Start year is {start_dt.year}. Did you mean {start_dt.year - 1}? Continue anyway? (y/n): ")
+        # Check if date is reasonable
+        if date_dt.year > 2025:
+            confirm = input(f"WARNING: Year is {date_dt.year}. Did you mean {date_dt.year - 1}? Continue anyway? (y/n): ")
             if confirm.lower() != 'y':
                 return
-        
-        if end_dt < start_dt:
-            print("ERROR: End date must be after start date.")
-            return
             
     except ValueError:
         print("ERROR: Invalid date format. Use YYYY-MM-DD (e.g., 2024-11-25)")
@@ -551,9 +545,9 @@ def main():
         print(f"BACKTESTING: {symbol}")
         print(f"{'='*70}")
         
-        # Fetch data from IBKR
-        df_10s = fetch_historical_data_ibkr(symbol, start_date, end_date, bar_size="10 secs")
-        df_1m = fetch_historical_data_ibkr(symbol, start_date, end_date, bar_size="1 min")
+        # Fetch data from IBKR (single trading day)
+        df_10s = fetch_historical_data_ibkr(symbol, trade_date, trade_date, bar_size="10 secs")
+        df_1m = fetch_historical_data_ibkr(symbol, trade_date, trade_date, bar_size="1 min")
         
         if df_10s.empty or df_1m.empty:
             print(f"\nWARNING: Could not fetch data for {symbol}. Skipping.")
@@ -561,7 +555,7 @@ def main():
         
         # Run backtest for this symbol
         engine = BacktestEngine(initial_capital=500.0)
-        engine.run_backtest(df_10s, df_1m, symbol, start_date, end_date)
+        engine.run_backtest(df_10s, df_1m, symbol, trade_date, trade_date)
         
         # Add symbol to trades and aggregate
         for trade in engine.trades:
@@ -618,11 +612,12 @@ def main():
         
         # Print all trades combined
         print("All Trade Details:")
-        print(f"{'#':<4} {'Symbol':<8} {'Entry Time':<30} {'Exit Time':<30} {'Entry $':<10} {'Exit $':<10} {'P&L $':<10} {'P&L %':<10} {'Reason':<20}")
+        print(f"{'#':<4} {'Symbol':<8} {'Entry Time':<30} {'Exit Time':<30} {'Entry $':<10} {'Exit $':<10} {'Comm $':<10} {'P&L $':<10} {'P&L %':<10} {'Reason':<20}")
         print(f"{'-'*150}")
         for i, trade in enumerate(all_trades, 1):
             print(f"{i:<4} {trade['symbol']:<8} {str(trade['entry_time']):<30} {str(trade['exit_time']):<30} "
                   f"${trade['entry_price']:<9.2f} ${trade['exit_price']:<9.2f} "
+                  f"${trade['commission']:<9.2f} "
                   f"${trade['pnl']:<9.2f} {trade['pnl_pct']:<9.2f}% {trade['exit_reason']:<20}")
         print(f"{'='*70}\n")
     
@@ -631,7 +626,7 @@ def main():
         save = input("\nSave results to CSV? (y/n): ").strip().lower()
         if save == 'y':
             results_df = pd.DataFrame(all_trades)
-            filename = f"backtest_{'_'.join(symbols)}_{start_date}_{end_date}.csv"
+            filename = f"backtest_{'_'.join(symbols)}_{trade_date}.csv"
             results_df.to_csv(filename, index=False)
             print(f"✓ Results saved to {filename}")
 
