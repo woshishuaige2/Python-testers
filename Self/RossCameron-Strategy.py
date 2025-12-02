@@ -46,6 +46,14 @@ class StrategyConfig:
     PATTERN_LOOKBACK_BARS = 30   # 30 minutes of 1-min bars for pattern detection
     MIN_BARS_FOR_PATTERN = 10    # Minimum bars needed for pattern analysis
     
+    # Momentum Detection with Flexibility
+    MIN_SURGE_PCT = 2.0              # Minimum 2% surge to qualify as momentum
+    SURGE_LOOKBACK_MIN = 5           # Check surge starting from 5 bars back
+    SURGE_LOOKBACK_MAX = 20          # Up to 20 bars back (catches extended moves)
+    MIN_PULLBACK_PCT = 0.3           # Minimum 0.3% pullback from recent high
+    MAX_PULLBACK_PCT = 5.0           # Maximum 5% pullback allowed
+    RECENT_HIGH_LOOKBACK = 15        # Check for high in last 15 bars
+    
     # Volume Analysis
     VOLUME_SPIKE_THRESHOLD = 2.0     # Volume must be < 2x average to avoid topping
     VOLUME_WICK_RATIO = 1.5           # Upper wick vs body ratio for topping detection
@@ -201,13 +209,18 @@ def check_macd_positive(bars):
 
 def detect_pullback_and_new_high(bars):
     """
-    Detect pullback pattern:
-    1. Initial surge (price went up significantly)
-    2. Pullback/dip occurred
-    3. First candle making new high after the dip
+    Detect pullback pattern with surge confirmation:
+    1. Verify momentum: 2%+ surge in last 5-20 bars
+    2. Find recent high and pullback (0.3-5%)
+    3. Breakout bar making higher high + green close
+    
+    This catches:
+    - Sharp surges (2%+ in 5-10 bars)
+    - Extended moves (2%+ in 10-20 bars)
+    While avoiding sideways/consolidation patterns
     
     Parameters:
-    - bars: List of bar dictionaries with 'high', 'low', 'close', 'open'
+    - bars: List of bar dictionaries with 'high', 'low', 'close', 'open', 'volume'
     
     Returns: (bool, str, float) - (pattern_found, message, pullback_low_price)
     """
@@ -217,43 +230,97 @@ def detect_pullback_and_new_high(bars):
     # Look at recent bars
     recent = bars[-StrategyConfig.PATTERN_LOOKBACK_BARS:] if len(bars) >= StrategyConfig.PATTERN_LOOKBACK_BARS else bars
     
-    # Find the highest high in the period
-    highs = [bar['high'] for bar in recent]
-    max_high = max(highs)
-    max_high_idx = len(recent) - 1 - highs[::-1].index(max_high)
+    if len(recent) < 8:
+        return False, "Insufficient data", None
     
-    # Check if we had a pullback (price went down from max_high)
-    if max_high_idx >= len(recent) - 2:
-        return False, "No pullback detected yet (still at high)", None
+    # STEP 1: Verify surge exists (2%+ move in last 5-20 bars)
+    surge_confirmed = False
+    surge_low = None
+    surge_high = None
+    surge_high_idx = None
     
-    # Check bars after the high for pullback
-    pullback_detected = False
-    pullback_low = max_high
+    # Try different lookback periods (5 to 20 bars)
+    for lookback in range(StrategyConfig.SURGE_LOOKBACK_MIN, min(StrategyConfig.SURGE_LOOKBACK_MAX + 1, len(recent) - 2)):
+        check_start_idx = len(recent) - lookback - 2  # Don't include last 2 bars
+        if check_start_idx < 0:
+            continue
+        
+        # Find low and high in this period
+        segment = recent[check_start_idx:-2]
+        if len(segment) < 3:
+            continue
+        
+        segment_low = min([bar['low'] for bar in segment])
+        segment_high = max([bar['high'] for bar in segment])
+        segment_high_idx_in_segment = [bar['high'] for bar in segment].index(segment_high)
+        segment_high_idx = check_start_idx + segment_high_idx_in_segment
+        
+        # Calculate surge percentage
+        surge_pct = ((segment_high - segment_low) / segment_low) * 100
+        
+        if surge_pct >= StrategyConfig.MIN_SURGE_PCT:
+            surge_confirmed = True
+            surge_low = segment_low
+            surge_high = segment_high
+            surge_high_idx = segment_high_idx
+            break
     
-    for i in range(max_high_idx + 1, len(recent)):
-        if recent[i]['low'] < pullback_low:
-            pullback_low = recent[i]['low']
-            pullback_detected = True
+    if not surge_confirmed:
+        return False, f"No surge: need {StrategyConfig.MIN_SURGE_PCT}%+ move in last {StrategyConfig.SURGE_LOOKBACK_MAX} bars", None
     
-    if not pullback_detected:
-        return False, "No pullback after surge", None
+    # STEP 2: Find recent high (in last 15 bars, excluding last 2)
+    lookback_bars = min(StrategyConfig.RECENT_HIGH_LOOKBACK, len(recent) - 2)
+    recent_segment = recent[-lookback_bars-2:-2]
     
-    # Check if the LAST bar is making a new high (breaking above previous resistance)
+    if len(recent_segment) < 3:
+        return False, "Not enough bars for pattern", None
+    
+    highs = [bar['high'] for bar in recent_segment]
+    recent_high = max(highs)
+    recent_high_idx_in_segment = highs.index(recent_high)
+    recent_high_idx = len(recent) - lookback_bars - 2 + recent_high_idx_in_segment
+    
+    # STEP 3: Find pullback low (after recent high, before last bar)
+    if recent_high_idx >= len(recent) - 2:
+        return False, "High too recent, no pullback yet", None
+    
+    bars_after_high = recent[recent_high_idx + 1:-1]
+    if len(bars_after_high) == 0:
+        return False, "No bars for pullback", None
+    
+    pullback_low = min([bar['low'] for bar in bars_after_high])
+    
+    # Calculate pullback percentage
+    pullback_pct = ((recent_high - pullback_low) / recent_high) * 100
+    
+    # Validate pullback is within range (0.3% - 5%)
+    if pullback_pct < StrategyConfig.MIN_PULLBACK_PCT:
+        return False, f"No pullback: {pullback_pct:.2f}% < {StrategyConfig.MIN_PULLBACK_PCT}%", None
+    
+    if pullback_pct > StrategyConfig.MAX_PULLBACK_PCT:
+        return False, f"Pullback too deep: {pullback_pct:.2f}% > {StrategyConfig.MAX_PULLBACK_PCT}%", None
+    
+    # STEP 4: Check breakout on last bar
     last_bar = recent[-1]
     second_last_bar = recent[-2]
     
-    # First candle making new high = current high > previous bar's high
-    if last_bar['high'] > second_last_bar['high'] and last_bar['close'] > last_bar['open']:
-        pullback_pct = ((max_high - pullback_low) / max_high) * 100
-        
-        # Validate minimum pullback requirement
-        if pullback_pct < StrategyConfig.MIN_PULLBACK_PCT:
-            return False, f"Pullback too shallow: {pullback_pct:.1f}% < {StrategyConfig.MIN_PULLBACK_PCT}% minimum", None
-        
-        message = f"Pattern detected: surge to {max_high:.2f}, pullback to {pullback_low:.2f} (-{pullback_pct:.1f}%), new high at {last_bar['high']:.2f}"
-        return True, message, pullback_low  # Return the pullback low price as stop loss
+    # Must make higher high and close green
+    if last_bar['high'] <= second_last_bar['high']:
+        return False, "No breakout - not making higher high", None
     
-    return False, "Waiting for first candle making new high", None
+    if last_bar['close'] <= last_bar['open']:
+        return False, "Breakout bar must close green", None
+    
+    # Optional: Verify we're still near the momentum (within 10% of recent high)
+    distance_from_high = ((recent_high - last_bar['close']) / recent_high) * 100
+    if distance_from_high > 10.0:
+        return False, f"Too far from high: {distance_from_high:.1f}% below", None
+    
+    # Pattern confirmed!
+    surge_pct_final = ((surge_high - surge_low) / surge_low) * 100
+    message = f"Momentum: {surge_pct_final:.1f}% surge (${surge_low:.2f}→${surge_high:.2f}), pullback {pullback_pct:.1f}% to ${pullback_low:.2f}, breakout ${last_bar['high']:.2f}"
+    
+    return True, message, pullback_low
 
 
 def check_volume_conditions(bars):

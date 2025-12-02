@@ -196,6 +196,8 @@ class BacktestEngine:
         self.position = None  # Current position: {'entry_price', 'stop_price', 'profit_price', 'shares', 'entry_time', 'entry_bar_idx'}
         self.trades = []  # List of completed trades
         self.equity_curve = []  # Track capital over time
+        self.trading_halted_today = False  # Flag to prevent entries after END OF DAY exit
+        self.current_trading_date = None  # Track current trading date
         
     def check_entry_conditions(self, bars_10s, bars_1m, current_bar_idx):
         """
@@ -371,6 +373,12 @@ class BacktestEngine:
             current_bar = bars_10s_list[i]
             current_time = current_bar['date']
             
+            # Reset trading halt flag on new day
+            current_date = current_time.date()
+            if self.current_trading_date is None or current_date != self.current_trading_date:
+                self.current_trading_date = current_date
+                self.trading_halted_today = False
+            
             # Skip after hours (after 4:00 PM) - include pre-market
             if current_time.hour >= 16:
                 continue
@@ -392,9 +400,14 @@ class BacktestEngine:
                 should_exit, exit_price, exit_reason = self.check_exit_conditions(recent_10s, i, current_time)
                 if should_exit:
                     self.exit_position(exit_price, current_time, exit_reason)
+                    
+                    # If END OF DAY exit, halt trading for rest of day
+                    if exit_reason == "END OF DAY":
+                        self.trading_halted_today = True
+                        print(f"[INFO] Trading halted for rest of day after END OF DAY exit at {current_time.strftime('%H:%M:%S')}")
             
-            # Check entry conditions (only if not in position)
-            if self.position is None:
+            # Check entry conditions (only if not in position and trading not halted)
+            if self.position is None and not self.trading_halted_today:
                 should_enter, entry_price, stop_price, profit_price, shares = \
                     self.check_entry_conditions(recent_10s, recent_1m, i)
                 
@@ -436,6 +449,11 @@ class BacktestEngine:
         total_pnl = sum([t['pnl'] for t in self.trades])
         avg_pnl = total_pnl / total_trades if total_trades > 0 else 0
         
+        # Commission stats
+        total_commission = sum([t['commission'] for t in self.trades])
+        avg_commission = total_commission / total_trades if total_trades > 0 else 0
+        total_pnl_gross = sum([t['pnl_gross'] for t in self.trades])
+        
         avg_win = sum([t['pnl'] for t in winning_trades]) / len(winning_trades) if winning_trades else 0
         avg_loss = sum([t['pnl'] for t in losing_trades]) / len(losing_trades) if losing_trades else 0
         
@@ -458,7 +476,9 @@ class BacktestEngine:
         print(f"Winning Trades: {len(winning_trades)} ({len(winning_trades)/total_trades*100:.1f}%)" if total_trades > 0 else "Winning Trades: 0 (0.0%)")
         print(f"Losing Trades: {len(losing_trades)}")
         print(f"\nP&L:")
-        print(f"  Total: ${total_pnl:+.2f} ({total_return_pct:+.2f}%)")
+        print(f"  Gross P&L: ${total_pnl_gross:+.2f}")
+        print(f"  Total Commission: ${total_commission:.2f} (${avg_commission:.2f}/trade)")
+        print(f"  Net P&L: ${total_pnl:+.2f} ({total_return_pct:+.2f}%)")
         print(f"  Average per trade: ${avg_pnl:+.2f}")
         print(f"  Average winner: ${avg_win:+.2f}")
         print(f"  Average loser: ${avg_loss:+.2f}")
@@ -470,12 +490,13 @@ class BacktestEngine:
         
         # Print individual trades
         print("Trade Details:")
-        print(f"{'#':<4} {'Entry Time':<20} {'Exit Time':<20} {'Entry $':<10} {'Exit $':<10} {'P&L $':<10} {'P&L %':<10} {'Reason':<20}")
-        print(f"{'-'*140}")
+        print(f"{'#':<4} {'Entry Time':<30} {'Exit Time':<30} {'Entry $':<10} {'Exit $':<10} {'Comm $':<10} {'Net P&L $':<10} {'P&L %':<10} {'Reason':<30}")
+        print(f"{'-'*150}")
         for i, trade in enumerate(self.trades, 1):
-            print(f"{i:<4} {str(trade['entry_time']):<20} {str(trade['exit_time']):<20} "
+            print(f"{i:<4} {str(trade['entry_time']):<30} {str(trade['exit_time']):<30} "
                   f"${trade['entry_price']:<9.2f} ${trade['exit_price']:<9.2f} "
-                  f"${trade['pnl']:<9.2f} {trade['pnl_pct']:<9.2f}% {trade['exit_reason']:<20}")
+                  f"${trade['commission']:<9.2f} "
+                  f"${trade['pnl']:<9.2f} {trade['pnl_pct']:<9.2f}% {trade['exit_reason']:<30}")
         print(f"{'='*70}\n")
 
 
@@ -597,10 +618,10 @@ def main():
         
         # Print all trades combined
         print("All Trade Details:")
-        print(f"{'#':<4} {'Symbol':<8} {'Entry Time':<20} {'Exit Time':<20} {'Entry $':<10} {'Exit $':<10} {'P&L $':<10} {'P&L %':<10} {'Reason':<20}")
+        print(f"{'#':<4} {'Symbol':<8} {'Entry Time':<30} {'Exit Time':<30} {'Entry $':<10} {'Exit $':<10} {'P&L $':<10} {'P&L %':<10} {'Reason':<20}")
         print(f"{'-'*150}")
         for i, trade in enumerate(all_trades, 1):
-            print(f"{i:<4} {trade['symbol']:<8} {str(trade['entry_time']):<20} {str(trade['exit_time']):<20} "
+            print(f"{i:<4} {trade['symbol']:<8} {str(trade['entry_time']):<30} {str(trade['exit_time']):<30} "
                   f"${trade['entry_price']:<9.2f} ${trade['exit_price']:<9.2f} "
                   f"${trade['pnl']:<9.2f} {trade['pnl_pct']:<9.2f}% {trade['exit_reason']:<20}")
         print(f"{'='*70}\n")
