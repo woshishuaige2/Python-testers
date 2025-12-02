@@ -14,9 +14,9 @@ Entry Conditions (ALL must be met):
 
 Exit Conditions:
 - Dynamic Exit: Candle Under Candle reversal (latest bar's low < previous bar's low)
-- Stop Loss: Structural stop at pullback low price (not fixed percentage)
-- Backup Profit Target: +10% limit order (cancelled if dynamic exit triggers first)
-- End of Day: All positions closed at 3:25 PM EST
+- Stop Loss: Structural stop at pullback low OR recent high (if >10% breakout), 1% buffer, minimum 2% distance
+- Backup Profit Target: +20% limit order (cancelled if dynamic exit triggers first)
+- End of Day: All positions closed at 3:50 PM EST
 
 Pre-Market Hours (5:00 AM - 9:30 AM EST):
 - Only limit orders allowed (entry at ASK, exit at BID)
@@ -444,7 +444,7 @@ def check_and_trade(app, contract, symbol):
         return {"symbol": symbol, "status": "INSUFFICIENT SESSION DATA", "bars": len(filtered_bars_1m), "skip": True}
     
     # Check all entry conditions using shared strategy module (filtered 1-min bars only)
-    all_ok, results, pullback_low_price = check_all_entry_conditions(
+    all_ok, results, pullback_low_price, recent_high_price = check_all_entry_conditions(
         filtered_bars_1m, 
         current_price
     )
@@ -508,8 +508,16 @@ def check_and_trade(app, contract, symbol):
     # Calculate entry/exit prices using shared strategy module
     entry_price, stop_price, profit_price = calculate_entry_exit_prices(
         app.ask_price[symbol], 
-        pullback_low_price
+        pullback_low_price,
+        recent_high_price
     )
+    
+    # Validate that we got valid prices
+    if entry_price is None or stop_price is None or profit_price is None:
+        print(f"Invalid entry/exit prices. Stop may be too close (<2%) or invalid. Skipping trade.")
+        result["status"] = "INVALID PRICES"
+        result["skip"] = True
+        return result
     
     # Calculate actual risk percentage
     risk_per_share = entry_price - stop_price
@@ -535,8 +543,12 @@ def check_and_trade(app, contract, symbol):
     risk_dollars = risk_per_share * qty
     risk_pct_actual = (risk_dollars / app.account_balance) * 100
     
+    # Determine which stop logic was used
+    breakout_pct = ((entry_price - recent_high_price) / recent_high_price) * 100 if recent_high_price else 0
+    stop_type = "recent high" if breakout_pct > 10.0 else "pullback low"
+    
     print(f"Trade Plan:")
-    print(f"  Entry: ${entry_price} | Stop: ${stop_price} (pullback low, -{stop_pct_actual:.1f}%) | Target: ${profit_price} (+{StrategyConfig.PROFIT_TARGET_PCT*100:.0f}%)")
+    print(f"  Entry: ${entry_price} | Stop: ${stop_price} ({stop_type}, -{stop_pct_actual:.1f}%) | Target: ${profit_price} (+{StrategyConfig.PROFIT_TARGET_PCT*100:.0f}%)")
     print(f"  Quantity: {qty} shares | Notional: ${notional:.2f} | Risk: ${risk_dollars:.2f} ({risk_pct_actual:.1f}%)\n")
     
     # Check if pre-market hours

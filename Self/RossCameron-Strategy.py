@@ -21,8 +21,8 @@ ENTRY CONDITIONS (ALL must be met):
 
 EXIT CONDITIONS:
 - Dynamic Exit: Candle Under Candle reversal (latest bar's low < previous bar's low)
-- Stop Loss: Structural stop at pullback low with 1% buffer, minimum 2% distance
-- Profit Target: +8% from entry price
+- Stop Loss: Structural stop at pullback low OR recent high (if >10% breakout), 1% buffer, minimum 2% distance
+- Profit Target: +20% from entry price
 - End of Day: Close all positions at 3:50 PM EST
 
 CONFIGURATION:
@@ -222,16 +222,16 @@ def detect_pullback_and_new_high(bars):
     Parameters:
     - bars: List of bar dictionaries with 'high', 'low', 'close', 'open', 'volume'
     
-    Returns: (bool, str, float) - (pattern_found, message, pullback_low_price)
+    Returns: (bool, str, float, float) - (pattern_found, message, pullback_low_price, recent_high_price)
     """
     if len(bars) < StrategyConfig.MIN_BARS_FOR_PATTERN:
-        return False, "Not enough bars", None
+        return False, "Not enough bars", None, None
     
     # Look at recent bars
     recent = bars[-StrategyConfig.PATTERN_LOOKBACK_BARS:] if len(bars) >= StrategyConfig.PATTERN_LOOKBACK_BARS else bars
     
     if len(recent) < 8:
-        return False, "Insufficient data", None
+        return False, "Insufficient data", None, None
     
     # STEP 1: Verify surge exists (2%+ move in last 5-20 bars)
     surge_confirmed = False
@@ -266,14 +266,14 @@ def detect_pullback_and_new_high(bars):
             break
     
     if not surge_confirmed:
-        return False, f"No surge: need {StrategyConfig.MIN_SURGE_PCT}%+ move in last {StrategyConfig.SURGE_LOOKBACK_MAX} bars", None
+        return False, f"No surge: need {StrategyConfig.MIN_SURGE_PCT}%+ move in last {StrategyConfig.SURGE_LOOKBACK_MAX} bars", None, None
     
     # STEP 2: Find recent high (in last 15 bars, excluding last 2)
     lookback_bars = min(StrategyConfig.RECENT_HIGH_LOOKBACK, len(recent) - 2)
     recent_segment = recent[-lookback_bars-2:-2]
     
     if len(recent_segment) < 3:
-        return False, "Not enough bars for pattern", None
+        return False, "Not enough bars for pattern", None, None
     
     highs = [bar['high'] for bar in recent_segment]
     recent_high = max(highs)
@@ -282,11 +282,11 @@ def detect_pullback_and_new_high(bars):
     
     # STEP 3: Find pullback low (after recent high, before last bar)
     if recent_high_idx >= len(recent) - 2:
-        return False, "High too recent, no pullback yet", None
+        return False, "High too recent, no pullback yet", None, None
     
     bars_after_high = recent[recent_high_idx + 1:-1]
     if len(bars_after_high) == 0:
-        return False, "No bars for pullback", None
+        return False, "No bars for pullback", None, None
     
     pullback_low = min([bar['low'] for bar in bars_after_high])
     
@@ -295,10 +295,10 @@ def detect_pullback_and_new_high(bars):
     
     # Validate pullback is within range (0.3% - 5%)
     if pullback_pct < StrategyConfig.MIN_PULLBACK_PCT:
-        return False, f"No pullback: {pullback_pct:.2f}% < {StrategyConfig.MIN_PULLBACK_PCT}%", None
+        return False, f"No pullback: {pullback_pct:.2f}% < {StrategyConfig.MIN_PULLBACK_PCT}%", None, None
     
     if pullback_pct > StrategyConfig.MAX_PULLBACK_PCT:
-        return False, f"Pullback too deep: {pullback_pct:.2f}% > {StrategyConfig.MAX_PULLBACK_PCT}%", None
+        return False, f"Pullback too deep: {pullback_pct:.2f}% > {StrategyConfig.MAX_PULLBACK_PCT}%", None, None
     
     # STEP 4: Check breakout on last bar
     last_bar = recent[-1]
@@ -306,21 +306,21 @@ def detect_pullback_and_new_high(bars):
     
     # Must make higher high and close green
     if last_bar['high'] <= second_last_bar['high']:
-        return False, "No breakout - not making higher high", None
+        return False, "No breakout - not making higher high", None, None
     
     if last_bar['close'] <= last_bar['open']:
-        return False, "Breakout bar must close green", None
+        return False, "Breakout bar must close green", None, None
     
     # Optional: Verify we're still near the momentum (within 10% of recent high)
     distance_from_high = ((recent_high - last_bar['close']) / recent_high) * 100
     if distance_from_high > 10.0:
-        return False, f"Too far from high: {distance_from_high:.1f}% below", None
+        return False, f"Too far from high: {distance_from_high:.1f}% below", None, None
     
     # Pattern confirmed!
     surge_pct_final = ((surge_high - surge_low) / surge_low) * 100
     message = f"Momentum: {surge_pct_final:.1f}% surge (${surge_low:.2f}→${surge_high:.2f}), pullback {pullback_pct:.1f}% to ${pullback_low:.2f}, breakout ${last_bar['high']:.2f}"
     
-    return True, message, pullback_low
+    return True, message, pullback_low, recent_high
 
 
 def check_volume_conditions(bars):
@@ -389,10 +389,10 @@ def check_all_entry_conditions(bars_1m, current_price):
     - bars_1m: List of 1-minute bars for pattern/MACD/volume/VWAP
     - current_price: Current price
     
-    Returns: (bool, dict, float) - (all_conditions_met, condition_results, pullback_low)
+    Returns: (bool, dict, float, float) - (all_conditions_met, condition_results, pullback_low, recent_high)
     """
     # Check each condition (all using 1-min bars now)
-    pattern_ok, pattern_msg, pullback_low = detect_pullback_and_new_high(bars_1m)
+    pattern_ok, pattern_msg, pullback_low, recent_high = detect_pullback_and_new_high(bars_1m)
     macd_ok, macd_msg = check_macd_positive(bars_1m)
     volume_ok, volume_msg = check_volume_conditions(bars_1m)
     vwap_ok, vwap_msg = check_above_vwap(bars_1m, current_price)
@@ -407,7 +407,7 @@ def check_all_entry_conditions(bars_1m, current_price):
     
     all_ok = pattern_ok and macd_ok and volume_ok and vwap_ok
     
-    return all_ok, results, pullback_low
+    return all_ok, results, pullback_low, recent_high
 
 
 # ==================== EXIT CONDITIONS ====================
@@ -525,21 +525,32 @@ def calculate_commission(shares, trade_value, is_sell=False):
     return commission
 
 
-def calculate_entry_exit_prices(current_price, pullback_low):
+def calculate_entry_exit_prices(current_price, pullback_low, recent_high):
     """
     Calculate entry price, stop price, and profit target
+    
+    For strong breakouts (entry >10% above recent high), use recent high as stop
+    to avoid excessive risk. Otherwise use pullback low.
     
     Parameters:
     - current_price: Current market price
     - pullback_low: Pullback low price (for stop loss)
+    - recent_high: Recent high price (used for strong breakout stops)
     
     Returns: (entry_price, stop_price, profit_price) or (None, None, None)
     """
     # Entry price: add spread
     entry_price = round(current_price * (1 + StrategyConfig.ENTRY_SPREAD_PCT), 2)
     
-    # Stop loss: pullback low with 1% buffer to avoid premature stops
-    stop_price = round(pullback_low * 0.99, 2)
+    # Check if this is a strong breakout (>10% above recent high)
+    breakout_pct = ((entry_price - recent_high) / recent_high) * 100 if recent_high else 0
+    
+    if breakout_pct > 10.0:
+        # Strong breakout: use recent high as stop (tighter risk management)
+        stop_price = round(recent_high * 0.99, 2)
+    else:
+        # Normal entry: use pullback low as stop
+        stop_price = round(pullback_low * 0.99, 2)
     
     # Profit target: % gain from entry
     profit_price = round(entry_price * (1 + StrategyConfig.PROFIT_TARGET_PCT), 2)

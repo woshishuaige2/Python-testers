@@ -212,13 +212,13 @@ class BacktestEngine:
         current_price = bars_10s[-1]['close']
         
         # Check all conditions using 1-min bars for pattern detection
-        all_ok, results, pullback_low = check_all_entry_conditions(bars_1m, current_price)
+        all_ok, results, pullback_low, recent_high = check_all_entry_conditions(bars_1m, current_price)
         
         if not all_ok or pullback_low is None:
             return False, None, None, None, None
         
         # Calculate entry parameters using shared strategy module
-        entry_price, stop_price, profit_price = calculate_entry_exit_prices(current_price, pullback_low)
+        entry_price, stop_price, profit_price = calculate_entry_exit_prices(current_price, pullback_low, recent_high)
         
         if entry_price is None:  # Invalid prices
             return False, None, None, None, None
