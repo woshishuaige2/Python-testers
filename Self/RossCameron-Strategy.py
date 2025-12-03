@@ -55,6 +55,7 @@ class StrategyConfig:
     RECENT_HIGH_LOOKBACK = 15        # Check for high in last 15 bars
     
     # Volume Analysis
+    MIN_RELATIVE_VOLUME = 1.5         # Minimum 1.5x average volume for entry (Ross Cameron style)
     VOLUME_SPIKE_THRESHOLD = 2.0     # Volume must be < 2x average to avoid topping
     VOLUME_WICK_RATIO = 1.5           # Upper wick vs body ratio for topping detection
     MAX_RED_CANDLES_IN_PULLBACK = 4   # Maximum red candles allowed in last 5 bars
@@ -72,9 +73,16 @@ class StrategyConfig:
     # Profit/Loss Targets
     PROFIT_TARGET_PCT = 0.2          # 20% profit target
     ENTRY_SPREAD_PCT = 0.002          # 0.2% spread simulation for entry
-    MIN_PULLBACK_PCT = 3.0            # 3% minimum pullback requirement
     
-    # Exit Timing
+    # Trading Hours (EST)
+    PREMARKET_START_HOUR = 5          # 5:00 AM
+    PREMARKET_START_MINUTE = 0
+    MARKET_OPEN_HOUR = 9              # 9:30 AM
+    MARKET_OPEN_MINUTE = 30
+    MARKET_CLOSE_HOUR = 15            # 3:50 PM
+    MARKET_CLOSE_MINUTE = 50
+    
+    # Exit Timing (same as market close)
     END_OF_DAY_HOUR = 15              # 3 PM
     END_OF_DAY_MINUTE = 50            # 3:50 PM
     
@@ -325,9 +333,11 @@ def detect_pullback_and_new_high(bars):
 
 def check_volume_conditions(bars):
     """
-    Check volume conditions:
-    1. No volume top (high volume with topping tail/wick)
-    2. No excessive selling pressure during pullback
+    Check volume conditions (Ross Cameron style):
+    1. HIGH relative volume required (1.5x+ average) - indicates institutional interest
+       - Uses average of last 2 bars vs average of previous 10 bars
+    2. No volume top (high volume with topping tail/wick)
+    3. No excessive selling pressure during pullback
     
     Parameters:
     - bars: List of bar dictionaries with 'high', 'low', 'close', 'open', 'volume'
@@ -338,10 +348,27 @@ def check_volume_conditions(bars):
         return False, "Not enough bars for volume analysis"
     
     recent = bars[-StrategyConfig.VOLUME_LOOKBACK_BARS:] if len(bars) >= StrategyConfig.VOLUME_LOOKBACK_BARS else bars
-    last_bar = recent[-1]
     
-    # Calculate average volume
-    avg_volume = sum([bar['volume'] for bar in recent[:-1]]) / len(recent[:-1])
+    if len(recent) < 3:  # Need at least 3 bars (1 for history + 2 for current check)
+        return False, "Not enough bars for volume analysis"
+    
+    last_bar = recent[-1]
+    second_last_bar = recent[-2]
+    
+    # Calculate average volume of previous 10 bars (excluding last 2)
+    history_bars = recent[:-2] if len(recent) > 2 else recent[:-1]
+    if len(history_bars) == 0:
+        return False, "Not enough historical bars for volume analysis"
+    
+    avg_volume = sum([bar['volume'] for bar in history_bars]) / len(history_bars)
+    
+    # Calculate average of last 2 bars
+    avg_last_2_bars = (last_bar['volume'] + second_last_bar['volume']) / 2
+    relative_volume = avg_last_2_bars / avg_volume if avg_volume > 0 else 0
+    
+    # REQUIREMENT 1: High relative volume (Ross Cameron style)
+    if relative_volume < StrategyConfig.MIN_RELATIVE_VOLUME:
+        return False, f"Low relative volume: {relative_volume:.2f}x avg of last 2 bars (need {StrategyConfig.MIN_RELATIVE_VOLUME}x+) - no momentum"
     
     # Check for volume top: high volume + long upper wick (topping tail)
     upper_wick = last_bar['high'] - max(last_bar['open'], last_bar['close'])
@@ -355,7 +382,7 @@ def check_volume_conditions(bars):
     if red_candles >= StrategyConfig.MAX_RED_CANDLES_IN_PULLBACK:
         return False, f"Excessive selling pressure: {red_candles}/5 red candles"
     
-    return True, f"Volume OK: current={last_bar['volume']:.0f}, avg={avg_volume:.0f}, no topping pattern"
+    return True, f"Strong volume: {relative_volume:.2f}x avg (last 2 bars: {avg_last_2_bars:.0f} vs hist avg: {avg_volume:.0f}), no topping pattern"
 
 
 def check_above_vwap(bars, current_price):

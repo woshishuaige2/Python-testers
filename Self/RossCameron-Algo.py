@@ -16,14 +16,14 @@ Exit Conditions:
 - Dynamic Exit: Candle Under Candle reversal (latest bar's low < previous bar's low)
 - Stop Loss: Structural stop at pullback low OR recent high (if >10% breakout), 1% buffer, minimum 2% distance
 - Backup Profit Target: +20% limit order (cancelled if dynamic exit triggers first)
-- End of Day: All positions closed at 3:50 PM EST
+- End of Day: All positions closed at market close (configured in StrategyConfig)
 
-Pre-Market Hours (5:00 AM - 9:30 AM EST):
+Pre-Market Hours (configured in StrategyConfig):
 - Only limit orders allowed (entry at ASK, exit at BID)
 - Stop loss and profit targets monitored manually with limit orders
-- At 9:30 AM, automatic stop loss orders are added for pre-market positions
+- At market open, automatic stop loss orders are added for pre-market positions
 
-Regular Hours (9:30 AM - 3:30 PM EST):
+Regular Hours (configured in StrategyConfig):
 - Full bracket orders with stop loss protection
 
 Features:
@@ -92,6 +92,8 @@ class TradingAlgo(EClient, EWrapper):
         self.entry_price = {}  # track actual entry price per symbol
         self.stop_price = {}  # track stop loss price per symbol
         self.profit_target_price = {}  # track profit target price per symbol
+        self.oca_group = {}  # track OCA group per symbol (for One-Cancels-All exit orders)
+        self.brackets_added_at_open = {}  # track if brackets were added at market open for pre-market positions
         self.current_symbol = None  # track which symbol is being processed
         self.current_reqid = None  # track which request ID is being processed
         self.vwap_cache = {}  # cached VWAP value per symbol
@@ -125,6 +127,11 @@ class TradingAlgo(EClient, EWrapper):
                 except ValueError:
                     # Fallback: already datetime or other format
                     bar_date = bar.date if isinstance(bar.date, datetime) else datetime.now()
+            
+            # Add timezone info (EST) to bar_date for proper comparison
+            est = timezone(timedelta(hours=-5))
+            if bar_date.tzinfo is None:
+                bar_date = bar_date.replace(tzinfo=est)
             
             # reqId 4001 = 10-second bars, reqId 4002 = 1-minute bars
             if reqId == 4001:
@@ -262,39 +269,53 @@ class TradingAlgo(EClient, EWrapper):
 
 
 def is_premarket():
-    """Check if current time is pre-market hours (5:00 AM - 9:30 AM EST)"""
+    """Check if current time is pre-market hours (configured in StrategyConfig)"""
     est = timezone(timedelta(hours=-5))  # EST is UTC-5
     now_est = datetime.now(est)
     hour = now_est.hour
     minute = now_est.minute
     
-    # 5:00 AM to 9:29 AM EST
-    if hour >= 5 and hour <= 8:
+    # Use StrategyConfig for trading hours
+    start_hour = StrategyConfig.PREMARKET_START_HOUR
+    start_min = StrategyConfig.PREMARKET_START_MINUTE
+    open_hour = StrategyConfig.MARKET_OPEN_HOUR
+    open_min = StrategyConfig.MARKET_OPEN_MINUTE
+    
+    # Check if in pre-market window
+    if hour > start_hour and hour < open_hour:
         return True
-    elif hour == 9 and minute < 30:
+    elif hour == start_hour and minute >= start_min:
+        return True
+    elif hour == open_hour and minute < open_min:
         return True
     return False
 
 
 def is_regular_hours():
-    """Check if current time is regular market hours (9:30 AM - 3:30 PM EST)"""
+    """Check if current time is regular market hours (configured in StrategyConfig)"""
     est = timezone(timedelta(hours=-5))  # EST is UTC-5
     now_est = datetime.now(est)
     hour = now_est.hour
     minute = now_est.minute
     
-    # 9:30 AM to 3:30 PM EST
-    if hour == 9 and minute >= 30:
+    # Use StrategyConfig for trading hours
+    open_hour = StrategyConfig.MARKET_OPEN_HOUR
+    open_min = StrategyConfig.MARKET_OPEN_MINUTE
+    close_hour = StrategyConfig.MARKET_CLOSE_HOUR
+    close_min = StrategyConfig.MARKET_CLOSE_MINUTE
+    
+    # Market open to close
+    if hour > open_hour and hour < close_hour:
         return True
-    elif hour >= 10 and hour <= 14:
+    elif hour == open_hour and minute >= open_min:
         return True
-    elif hour == 15 and minute <= 30:
+    elif hour == close_hour and minute <= close_min:
         return True
     return False
 
 
 def is_trading_hours():
-    """Check if current time is between 05:00 AM - 03:30 PM EST (pre-market + regular hours)"""
+    """Check if current time is within trading hours (pre-market + regular hours from StrategyConfig)"""
     return is_premarket() or is_regular_hours()
 
 
@@ -318,8 +339,8 @@ def check_and_trade(app, contract, symbol):
     if symbol not in app.premarket_entry:
         app.premarket_entry[symbol] = False
     
-    # Don't check if already in position
-    if app.in_position[symbol]:
+    # Don't check if already in position OR pending entry
+    if app.in_position[symbol] or app.pending_entry[symbol]:
         # Get current price for display
         app.current_symbol = symbol
         if symbol in app.last_price:
@@ -329,6 +350,10 @@ def check_and_trade(app, contract, symbol):
         app.cancelMktData(1)
         
         current_price = app.last_price.get(symbol, 0)
+        
+        # Return appropriate status
+        if app.pending_entry[symbol]:
+            return {"symbol": symbol, "status": "PENDING ENTRY", "skip": True, "price": current_price}
         
         # Return position details for display
         entry = app.entry_price.get(symbol, 0)
@@ -353,7 +378,7 @@ def check_and_trade(app, contract, symbol):
             if elapsed > 300:  # 5 minutes
                 print(f"\n[WARNING] Stale pending order for {symbol} ({elapsed:.0f}s old) - cancelling...")
                 if symbol in app.entry_order_id:
-                    app.cancelOrder(app.entry_order_id[symbol], "")
+                    app.cancelOrder(app.entry_order_id[symbol])
                     del app.entry_order_id[symbol]
                 app.pending_entry[symbol] = False
                 if symbol in app.pending_entry_time:
@@ -437,8 +462,9 @@ def check_and_trade(app, contract, symbol):
         # Pre-market: use all available bars (no filtering needed)
         filtered_bars_1m = app.bars_1min[symbol]
     else:
-        # Regular hours: use only bars from 9:30 AM onwards for session VWAP
-        filtered_bars_1m = [b for b in app.bars_1min[symbol] if b['date'].hour > 9 or (b['date'].hour == 9 and b['date'].minute >= 30)]
+        # Regular hours: use ONLY bars >= 9:30 AM TODAY for session VWAP
+        # Compare actual datetime objects, not just hour/minute (to exclude pre-market)
+        filtered_bars_1m = [b for b in app.bars_1min[symbol] if b['date'] >= market_open]
     
     if len(filtered_bars_1m) < 10:
         return {"symbol": symbol, "status": "INSUFFICIENT SESSION DATA", "bars": len(filtered_bars_1m), "skip": True}
@@ -580,13 +606,19 @@ def check_and_trade(app, contract, symbol):
     
     if not in_premarket:
         # Regular hours: place full bracket order with stop loss
+        # Use OCA (One-Cancels-All) group so IBKR automatically cancels other orders when one fills
+        oca_group_name = f"OCA_{symbol}_{parent_id}"
+        app.oca_group[symbol] = oca_group_name
+        
         profit_taker = Order()
         profit_taker.action = "SELL"
         profit_taker.orderType = "LMT"
         profit_taker.lmtPrice = profit_price
         profit_taker.totalQuantity = qty
         profit_taker.tif = "GTC"
-        profit_taker.transmit = False
+        profit_taker.transmit = True  # Must transmit to exchange
+        profit_taker.ocaGroup = oca_group_name  # Set OCA group
+        profit_taker.ocaType = 1  # Cancel all remaining orders on fill
         try:
             profit_taker.eTradeOnly = False
             profit_taker.firmQuoteOnly = False
@@ -599,7 +631,9 @@ def check_and_trade(app, contract, symbol):
         stop_loss.auxPrice = stop_price
         stop_loss.totalQuantity = qty
         stop_loss.tif = "GTC"
-        stop_loss.transmit = True
+        stop_loss.transmit = True  # Must transmit to exchange
+        stop_loss.ocaGroup = oca_group_name  # Set OCA group
+        stop_loss.ocaType = 1  # Cancel all remaining orders on fill
         try:
             stop_loss.eTradeOnly = False
             stop_loss.firmQuoteOnly = False
@@ -610,14 +644,17 @@ def check_and_trade(app, contract, symbol):
         stop_id = app.nextOid()
         
         profit_taker.orderId = profit_id
-        profit_taker.parentId = parent_id
+        # Don't use parentId - let OCA group handle order relationships
+        # profit_taker.parentId = parent_id  # REMOVED: causes \"parent being cancelled\" errors
         stop_loss.orderId = stop_id
-        stop_loss.parentId = parent_id
+        # stop_loss.parentId = parent_id     # REMOVED: OCA group handles this instead
         
         app.profit_order_id[symbol] = profit_id
         app.stop_order_id[symbol] = stop_id
         app.profit_order_active[symbol] = True  # Mark as active when placed
         app.stop_order_active[symbol] = True    # Mark as active when placed
+        
+        print(f"[DEBUG] OCA group '{oca_group_name}' created for {symbol} bracket orders")
         
         print(f"[DEBUG] Bracket orders for {symbol}: Profit ID={profit_id}, Stop ID={stop_id}, both marked ACTIVE")
     
@@ -797,11 +834,11 @@ if __name__ == "__main__":
             current_time_str = now_est.strftime('%H:%M:%S')
             current_time = time.time()
             
-            # Check if within trading hours (5:00 AM - 3:30 PM EST)
+            # Check if within trading hours (5:00 AM - 3:50 PM EST)
             if not is_trading_hours():
                 if current_time - last_display_time > 60:  # Update every 60 seconds when outside hours
                     os.system('cls' if os.name == 'nt' else 'clear')
-                    print(f"\n[{current_time_str}] Outside trading hours (5:00 AM - 3:30 PM EST). Waiting...")
+                    print(f"\n[{current_time_str}] Outside trading hours (5:00 AM - 3:50 PM EST). Waiting...")
                     last_display_time = current_time
                 time.sleep(60)  # check every minute
                 continue
@@ -1099,6 +1136,77 @@ if __name__ == "__main__":
                                 time.sleep(2)
                                 continue
                     
+                    # CRITICAL: Add bracket orders at market open for pre-market positions
+                    # This provides stop loss protection once regular hours begin
+                    if is_regular_hours() and app.premarket_entry.get(symbol, False) and not app.brackets_added_at_open.get(symbol, False):
+                        # Pre-market position without brackets - add them now!
+                        timestamp = datetime.now().strftime('%H:%M:%S')
+                        print(f"\n{'='*70}")
+                        print(f"[{timestamp}] 🛡️  ADDING BRACKETS AT MARKET OPEN - {symbol}")
+                        print(f"{'='*70}")
+                        print(f"Pre-market position detected without bracket orders")
+                        print(f"Entry: ${app.entry_price.get(symbol, 0):.2f}")
+                        print(f"Adding stop loss (${app.stop_price.get(symbol, 0):.2f}) and profit target (${app.profit_target_price.get(symbol, 0):.2f})...")
+                        
+                        # Create OCA group for brackets
+                        oca_group_name = f"OCA_{symbol}_{int(time.time())}"
+                        app.oca_group[symbol] = oca_group_name
+                        
+                        # Profit target order
+                        profit_taker = Order()
+                        profit_taker.action = "SELL"
+                        profit_taker.orderType = "LMT"
+                        profit_taker.lmtPrice = app.profit_target_price[symbol]
+                        profit_taker.totalQuantity = app.position[symbol]
+                        profit_taker.tif = "GTC"
+                        profit_taker.transmit = True  # Must transmit to exchange
+                        profit_taker.ocaGroup = oca_group_name
+                        profit_taker.ocaType = 1
+                        try:
+                            profit_taker.eTradeOnly = False
+                            profit_taker.firmQuoteOnly = False
+                        except Exception:
+                            pass
+                        
+                        # Stop loss order
+                        stop_loss = Order()
+                        stop_loss.action = "SELL"
+                        stop_loss.orderType = "STP"
+                        stop_loss.auxPrice = app.stop_price[symbol]
+                        stop_loss.totalQuantity = app.position[symbol]
+                        stop_loss.tif = "GTC"
+                        stop_loss.transmit = True
+                        stop_loss.ocaGroup = oca_group_name
+                        stop_loss.ocaType = 1
+                        try:
+                            stop_loss.eTradeOnly = False
+                            stop_loss.firmQuoteOnly = False
+                        except Exception:
+                            pass
+                        
+                        profit_id = app.nextOid()
+                        stop_id = app.nextOid()
+                        
+                        profit_taker.orderId = profit_id
+                        stop_loss.orderId = stop_id
+                        
+                        # Place orders
+                        app.placeOrder(profit_taker.orderId, contracts[symbol], profit_taker)
+                        app.placeOrder(stop_loss.orderId, contracts[symbol], stop_loss)
+                        
+                        # Track order IDs and mark brackets as added
+                        app.profit_order_id[symbol] = profit_id
+                        app.stop_order_id[symbol] = stop_id
+                        app.profit_order_active[symbol] = True
+                        app.stop_order_active[symbol] = True
+                        app.brackets_added_at_open[symbol] = True
+                        
+                        print(f"✓ Bracket orders placed with OCA group: {oca_group_name}")
+                        print(f"  Profit order ID: {profit_id}")
+                        print(f"  Stop order ID: {stop_id}")
+                        print(f"{'='*70}\n")
+                        time.sleep(1)
+                    
                     # Check for dynamic exit signal (Candle Under Candle) using shared strategy module
                     bars_for_check = app.bars.get(symbol, [])
                     
@@ -1145,34 +1253,30 @@ if __name__ == "__main__":
                                     exit_order.lmtPrice = app.bid_price[symbol]
                                     exit_order.totalQuantity = app.position[symbol]
                                     exit_order.tif = "DAY"
+                                    exit_order.transmit = True  # Fully automatic execution
                                     
                                     exit_id = app.nextOid()
                                     exit_order.orderId = exit_id
                                     app.placeOrder(exit_order.orderId, contracts[symbol], exit_order)
                                     print(f"Limit sell order placed: {app.position[symbol]} shares @ ${app.bid_price[symbol]}")
                             else:
-                                print(f"Cancelling profit taker and stop loss, placing market sell order...")
+                                # Regular hours: Place dynamic exit order in SAME OCA group as brackets
+                                # IBKR will automatically cancel profit/stop when this fills
+                                print(f"Regular hours: Placing market exit in OCA group (auto-cancels brackets)...")
                                 
-                                # Cancel both profit taker and stop loss orders
-                                if symbol in app.profit_order_id and app.profit_order_active.get(symbol, False):
-                                    app.cancelOrder(app.profit_order_id[symbol])
-                                    print(f"Profit taker order {app.profit_order_id[symbol]} cancel requested")
-                                    app.profit_order_active[symbol] = False
-                                
-                                if symbol in app.stop_order_id and app.stop_order_active.get(symbol, False):
-                                    app.cancelOrder(app.stop_order_id[symbol])
-                                    print(f"Stop loss order {app.stop_order_id[symbol]} cancel requested")
-                                    app.stop_order_active[symbol] = False
-                                
-                                # Wait briefly for cancellation to process
-                                time.sleep(0.5)
-                                
-                                # Place market order to exit
                                 exit_order = Order()
                                 exit_order.action = "SELL"
                                 exit_order.orderType = "MKT"
                                 exit_order.totalQuantity = app.position[symbol]
                                 exit_order.tif = "DAY"
+                                exit_order.transmit = True  # Fully automatic execution
+                                
+                                # Join the same OCA group as profit/stop orders
+                                if symbol in app.oca_group:
+                                    exit_order.ocaGroup = app.oca_group[symbol]
+                                    exit_order.ocaType = 1  # Cancel all remaining orders on fill
+                                    print(f"  → Using OCA group: {app.oca_group[symbol]}")
+                                    print(f"  → When this fills, IBKR will auto-cancel profit (${app.profit_target_price.get(symbol, 0):.2f}) and stop (${app.stop_price.get(symbol, 0):.2f})")
                                 
                                 exit_id = app.nextOid()
                                 exit_order.orderId = exit_id

@@ -16,8 +16,8 @@ Entry Conditions (ALL must be met):
 Exit Conditions:
 - Dynamic Exit: Candle Under Candle reversal (latest bar's low < previous bar's low)
 - Stop Loss: Structural stop at pullback low price (not fixed percentage)
-- Backup Profit Target: +10% limit order (cancelled if dynamic exit triggers first)
-- End of Day: All positions closed at 3:25 PM EST
+- Backup Profit Target: +20% limit order (cancelled if dynamic exit triggers first)
+- End of Day: All positions closed at 3:50 PM EST
 
 Data Requirements:
 - 10-second bars for pattern/MACD/volume analysis
@@ -185,6 +185,48 @@ def fetch_historical_data_ibkr(symbol, start_date, end_date, bar_size="10 secs")
     
     print(f"✓ Fetched {len(df)} bars")
     return df
+
+
+def is_premarket(dt):
+    """Check if given datetime is pre-market hours (5:00 AM - 9:30 AM EST)"""
+    hour = dt.hour
+    minute = dt.minute
+    
+    # Use StrategyConfig for trading hours
+    start_hour = StrategyConfig.PREMARKET_START_HOUR
+    start_min = StrategyConfig.PREMARKET_START_MINUTE
+    open_hour = StrategyConfig.MARKET_OPEN_HOUR
+    open_min = StrategyConfig.MARKET_OPEN_MINUTE
+    
+    # Check if in pre-market window
+    if hour > start_hour and hour < open_hour:
+        return True
+    elif hour == start_hour and minute >= start_min:
+        return True
+    elif hour == open_hour and minute < open_min:
+        return True
+    return False
+
+
+def is_regular_hours(dt):
+    """Check if given datetime is regular market hours (9:30 AM - 3:50 PM EST)"""
+    hour = dt.hour
+    minute = dt.minute
+    
+    # Use StrategyConfig for trading hours
+    open_hour = StrategyConfig.MARKET_OPEN_HOUR
+    open_min = StrategyConfig.MARKET_OPEN_MINUTE
+    close_hour = StrategyConfig.MARKET_CLOSE_HOUR
+    close_min = StrategyConfig.MARKET_CLOSE_MINUTE
+    
+    # Market open to close
+    if hour > open_hour and hour < close_hour:
+        return True
+    elif hour == open_hour and minute >= open_min:
+        return True
+    elif hour == close_hour and minute <= close_min:
+        return True
+    return False
 
 
 class BacktestEngine:
@@ -379,23 +421,10 @@ class BacktestEngine:
                 self.current_trading_date = current_date
                 self.trading_halted_today = False
             
-            # Skip after hours (after 4:00 PM) - include pre-market
-            if current_time.hour >= 16:
-                continue
-            
             # Get recent bars for analysis
             recent_10s = bars_10s_list[i-lookback_bars:i+1]
             
-            # Get 1-min bars for VWAP: Use session VWAP from 9:30 AM onwards (ignore pre-market)
-            market_open_time = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
-            if current_time.hour < 9 or (current_time.hour == 9 and current_time.minute < 30):
-                # Pre-market: use only pre-market bars
-                recent_1m = [b for b in bars_1m_list if b['date'] <= current_time][-lookback_1m:]
-            else:
-                # Regular hours: use only bars from 9:30 AM onwards for session VWAP
-                recent_1m = [b for b in bars_1m_list if b['date'] >= market_open_time and b['date'] <= current_time]
-            
-            # Check exit conditions first
+            # Check exit conditions FIRST (must check exits even outside trading hours)
             if self.position is not None:
                 should_exit, exit_price, exit_reason = self.check_exit_conditions(recent_10s, i, current_time)
                 if should_exit:
@@ -405,6 +434,20 @@ class BacktestEngine:
                     if exit_reason == "END OF DAY":
                         self.trading_halted_today = True
                         print(f"[INFO] Trading halted for rest of day after END OF DAY exit at {current_time.strftime('%H:%M:%S')}")
+            
+            # Skip non-trading hours for NEW ENTRIES (but continue checking exits for existing positions above)
+            # Only allow entries during pre-market (5:00 AM - 9:30 AM) and regular hours (9:30 AM - 3:50 PM)
+            if not is_premarket(current_time) and not is_regular_hours(current_time):
+                continue
+            
+            # Get 1-min bars for VWAP: Use session VWAP from 9:30 AM onwards (ignore pre-market)
+            market_open_time = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
+            if current_time.hour < 9 or (current_time.hour == 9 and current_time.minute < 30):
+                # Pre-market: use only pre-market bars
+                recent_1m = [b for b in bars_1m_list if b['date'] <= current_time][-lookback_1m:]
+            else:
+                # Regular hours: use only bars from 9:30 AM onwards for session VWAP
+                recent_1m = [b for b in bars_1m_list if b['date'] >= market_open_time and b['date'] <= current_time]
             
             # Check entry conditions (only if not in position and trading not halted)
             if self.position is None and not self.trading_halted_today:
