@@ -2,7 +2,7 @@ from ibapi.client import *
 from ibapi.wrapper import *
 import datetime
 
-port = 7496
+port = 7497
 
 
 class TestApp(EClient, EWrapper):
@@ -18,11 +18,11 @@ class TestApp(EClient, EWrapper):
         self.reqHistoricalTicks(
             reqId=orderId,
             contract=mycontract,
-            startDateTime="",
-            endDateTime="20240927 10:18:00 US/Eastern",
-            numberOfTicks=1000,
-            whatToShow="TRADES",
-            useRth=0,
+            startDateTime="20250923-13:30:01",
+            endDateTime="",
+            numberOfTicks=1,
+            whatToShow="Trades",
+            useRth=1,
             ignoreSize=False,
             miscOptions=[],
         )
@@ -33,15 +33,15 @@ class TestApp(EClient, EWrapper):
         ticks: ListOfHistoricalTickLast, 
         done: bool,
     ):
-        for tick in ticks:
-            if tick.price <= 108.93:
-                print(
-                    "historicalTicksLast.", 
-                    f"reqId:{reqId}", 
-                    datetime.datetime.fromtimestamp(tick.time),
-                    f"ticks:{tick.price}"
-                )
-        self.disconnect()
+        print(f"Number of ticks: {len(ticks)}")
+        # for tick in ticks:
+        #     print(
+        #         "historicalTicksLast.", 
+        #         f"reqId:{reqId}", 
+        #         datetime.datetime.fromtimestamp(tick.time),
+        #         f"ticks:{tick.price}"
+        #     )
+        # self.disconnect()
 
     def historicalTicksBidAsk(
         self, 
@@ -49,13 +49,13 @@ class TestApp(EClient, EWrapper):
         ticks: ListOfHistoricalTickBidAsk, 
         done: bool,
     ):
+        # print(type(ticks[0]))
         for tick in ticks:
             print(
                 "historicalTicksBidAsk.", 
-                f"reqId:{reqId}", 
-                datetime.datetime.fromtimestamp(tick.time),
                 f"ticks:{tick}"
             )
+        self.disconnect()
 
     def historicalTicks(
         self, 
@@ -72,11 +72,11 @@ class TestApp(EClient, EWrapper):
             )
 
     def error(self, reqId: TickerId, errorTime: int, errorCode: int, errorString: str, advancedOrderRejectJson=""):
-        print(f"Error., Time of Error: {datetime.datetime.fromtimestamp(errorTime)}, Error Code: {errorCode}, Error Message: {errorString}")
+        print(f"Error., Error Code: {errorCode}, Error Message: {errorString}")
         if advancedOrderRejectJson != "":
             print(f"AdvancedOrderRejectJson: {advancedOrderRejectJson}")
 
 
 app = TestApp()
-app.connect("127.0.0.1", port, 0)
+app.connect("127.0.0.1", port, 1)
 app.run()

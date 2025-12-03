@@ -14,9 +14,10 @@ class TestApp(EClient, EWrapper):
         # Creates a generic feed that provides all news articles sent by the resource
         # Must set generic tick list to 'genericTickList="mdoff,292"' when using this request.
         contract2 = Contract()
-        contract2.symbol = "DJNL:DJNL_ALL"
+        # contract2.symbol = "BZ:BZ_ALL"
+        contract2.symbol = "DJ:N_RBS"
         contract2.secType = "NEWS"
-        contract2.exchange = "DJNL"
+        contract2.exchange = "DJ"
 
         # Places the request for news data. Note the generic tick list string.
         self.reqMktData(

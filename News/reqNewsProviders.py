@@ -25,5 +25,5 @@ class TestApp(EClient, EWrapper):
             print(f"AdvancedOrderRejectJson: {advancedOrderRejectJson}")
 
 app = TestApp()
-app.connect("127.0.0.1", port, 0)
+app.connect("127.0.0.1", port, 10)
 app.run()

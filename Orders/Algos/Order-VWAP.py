@@ -19,14 +19,16 @@ class TestApp(EClient, EWrapper):
         order = Order()
         order.action = "BUY"
         order.totalQuantity = 1
-        order.orderType = "MKT"
+        order.orderType = "LMT"
+        order.lmtPrice = 9.81
         order.tif = "DAY"
+        # order.outsideRth = True
         order.algoStrategy = "Vwap"
 
         order.algoParams = []
         order.algoParams.append(TagValue("maxPctVol", .3))
-        order.algoParams.append(TagValue("startTime", "15:00:00 US/Eastern"))
-        order.algoParams.append(TagValue("endTime", "17:00:00 US/Eastern"))
+        order.algoParams.append(TagValue("startTime", "16:02:00 US/Los_Angeles"))
+        order.algoParams.append(TagValue("endTime", "23:30:00 US/Los_Angeles"))
         order.algoParams.append(TagValue("allowPastEndTime",int(0)))
         order.algoParams.append(TagValue("noTakeLiq", int(0)))
         order.algoParams.append(TagValue("speedUp", int(1)))

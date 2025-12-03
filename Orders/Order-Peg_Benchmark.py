@@ -21,7 +21,7 @@ class TestApp(EClient, EWrapper):
         myorder.action = "BUY"
         myorder.totalQuantity = 100
         #Beginning with price...
-        myorder.startingPrice = 0
+        myorder.startingPrice = 280
         #increase/decrease price..
         myorder.isPeggedChangeAmountDecrease = False
         #by... (and likewise for price moving in opposite direction)
@@ -33,11 +33,11 @@ class TestApp(EClient, EWrapper):
         #being traded at...
         myorder.referenceExchangeId = "SMART"
         #starting reference price is...
-        myorder.stockRefPrice = 230
+        myorder.stockRefPrice = 200
         #Keep myorder active as long as reference contract trades between...
-        myorder.stockRangeLower = 220
+        myorder.stockRangeLower = 190
         #and...
-        myorder.stockRangeUpper = 230
+        myorder.stockRangeUpper = 240
 
         self.placeOrder(myorder.orderId, mycontract, myorder)
 

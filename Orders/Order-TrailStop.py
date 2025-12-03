@@ -19,16 +19,16 @@ class TestApp(EClient, EWrapper):
         order = Order()
         order.orderId = orderId
         order.action = "SELL"
-        order.orderType = "TRAIL LIMIT"
+        order.orderType = "TRAIL"
         order.tif = "DAY"
         order.totalQuantity = 100
-        order.trailStopPrice = 225 
+        order.trailStopPrice = 200 
         order.trailingPercent = 5.5
 
         '''
         You must specify one value: limit price or limit price offset value.
         '''
-        # order.lmtPrice = 222
+        order.lmtPrice = 222
         order.lmtPriceOffset = 0.03
 
         self.placeOrder(order.orderId, mycontract, order)

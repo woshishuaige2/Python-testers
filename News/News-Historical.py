@@ -2,7 +2,7 @@ from ibapi.client import *
 from ibapi.wrapper import *
 
 
-port = 7496
+port = 7497
 
 
 class TestApp(EClient, EWrapper):
@@ -13,13 +13,13 @@ class TestApp(EClient, EWrapper):
 
         self.reqHistoricalNews(
             reqId=orderId, 
-            conId=495759171, # BTC ConId
-            providerCodes="BRFUPDN", #BRFG+BRFUPDN+DJNL 
-            startDateTime="20240101 00:00:01", 
+            conId=281858120, # BTC ConId
+            providerCodes="DJ-N", #BRFG+BRFUPDN+DJNL 
+            startDateTime="20250801 00:00:01", 
             endDateTime="", 
-            totalResults= 5, 
+            totalResults= 15, 
             historicalNewsOptions=[]
-        )
+        )     
 
     # Receives Data from reqHistoricalNews
     def historicalNews(self, requestId: int, time: str, providerCode: str, articleId: str, headline: str):

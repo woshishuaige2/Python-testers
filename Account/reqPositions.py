@@ -15,7 +15,8 @@ class TestApp(EWrapper, EClient):
         self.reqPositions()
 
     def position(self, account: str, contract: Contract, position: Decimal, avgCost: float):
-        print(f"Positions. Account: {account}, Contract: {contract}, Position: {position}, Average Cost: {avgCost}")
+        # print(f"Positions. Account: {account}, Contract: {contract}, Position: {position}, Average Cost: {avgCost}")
+        print(f"{contract.symbol} | {contract.secType} | PrimaryExchange: {contract.primaryExchange} | Exchange: {contract.exchange}")
 
     def positionEnd(self):
         self.cancelPositions()

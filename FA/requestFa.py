@@ -23,5 +23,5 @@ class TestApp(EClient, EWrapper):
 
 
 app = TestApp()
-app.connect("127.0.0.1", port, 0)
+app.connect("127.0.0.1", 4002, 0)
 app.run()

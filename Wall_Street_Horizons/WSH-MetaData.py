@@ -2,7 +2,7 @@ from ibapi.client import *
 from ibapi.wrapper import *
 import json
 
-port = 7496
+port = 7497
 
 
 class TestApp(EClient, EWrapper):
@@ -14,7 +14,7 @@ class TestApp(EClient, EWrapper):
 
     def wshMetaData(self, reqId: TickerId, data: str):
         jsonDict = json.dumps(json.loads(data), indent=2)
-        open('./wshMetaData.xml', 'w').write(jsonDict)
+        # open('./wshMetaData.xml', 'w').write(jsonDict)
         
         print("WSH Meta Data received.")
         jcon = json.loads(data)

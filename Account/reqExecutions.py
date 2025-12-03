@@ -10,6 +10,9 @@ class TestApp(EClient, EWrapper):
 
     def nextValidId(self, orderId: OrderId):
         execFilter = ExecutionFilter()
+        # execFilter.lastNDays = 7
+        # execFilter.time = "20250410 11:19:00 America/Chicago"
+
         # execFilter.acctCode = ""
         # execFilter.time = ""
         # execFilter.exchange = ""
@@ -18,11 +21,18 @@ class TestApp(EClient, EWrapper):
         # execFilter.symbol = ""
         # execFilter.clientId = ""
 
-        self.reqExecutions(self.orderId, execFilter)
+        self.reqExecutions(orderId, execFilter)
 
 
     def execDetails(self, reqId: int, contract: Contract, execution: Execution):
-        print("execDetails: ", contract, execution)
+        # print("execDetails: ", contract, execution)
+        
+        attrs = vars(execution)
+        print(
+            f"reqId:{reqId}",
+            "\n",
+            "\n".join(f"{name}: {value}" for name, value in attrs.items())
+        )
 
     def commissionAndFeesReport(self, commissionAndFeesReport: CommissionAndFeesReport):
         print("commission: ", commissionAndFeesReport)

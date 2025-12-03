@@ -8,7 +8,7 @@ class TestApp(EClient, EWrapper):
         EClient.__init__(self, self)
 
     def nextValidId(self, orderId: OrderId):
-        mktRules = [2963]
+        mktRules = [26]
         for i in mktRules:
             self.reqMarketRule(i)
 

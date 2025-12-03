@@ -28,6 +28,7 @@ class TestApp(EClient, EWrapper):
         order.algoParams.append(TagValue("startTime", "15:00:00 US/Eastern"))
         order.algoParams.append(TagValue("endTime", "17:00:00 US/Eastern"))
         order.algoParams.append(TagValue("allowPastEndTime", 0))
+        order.algoParams.append(TagValue("conditionalPrice", 130.0))
         order.algoParams.append(TagValue("catchUp", 0))
         
         self.placeOrder(orderId, contract, order)
