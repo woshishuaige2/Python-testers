@@ -5,11 +5,10 @@ Backtests alert conditions against historical data for a specific date.
 WORKFLOW:
 1. User inputs symbols (up to 5) and target date
 2. Scanner initializes with default conditions (Price>VWAP, Price Surge, Volume Surge)
-3. Historical OHLCV data is loaded (from data provider or simulated)
+3. Historical OHLCV data is loaded from IBKR TWS
 4. For each candle, scanner checks if ALL conditions are met
 5. When all conditions trigger, an alert is recorded with timestamp and details
 6. Results displayed in formatted console output and exported to JSON
-7. Optional: Check TWS connectivity for future live integration
 
 Key Features:
 - Processes up to 5 symbols simultaneously
@@ -28,16 +27,17 @@ from conditions import (
     MarketData,
     PriceAboveVWAPCondition,
     PriceSurgeCondition,
-    VolumeSurgeCondition
+    VolumeSurgeCondition,
+    PRICE_SURGE_THRESHOLD,
+    VOLUME_SURGE_THRESHOLD
 )
 
-# Try to import TWS integration for connectivity check
+# Import TWS integration - REQUIRED
 try:
     from tws_data_fetcher import create_tws_data_app, TWSDataApp
-    HAS_TWS = True
 except ImportError:
-    HAS_TWS = False
-    print("[WARN] TWS integration not available. Install ibapi: pip install ibapi")
+    print("[ERROR] TWS integration not available. Install ibapi: pip install ibapi")
+    exit(1)
 
 
 @dataclass
@@ -170,8 +170,8 @@ class BacktestAlertScanner:
         for symbol in self.symbols:
             condition_set = AlertConditionSet(f"{symbol}_backtest")
             condition_set.add_condition(PriceAboveVWAPCondition())
-            condition_set.add_condition(PriceSurgeCondition(surge_threshold=2))
-            condition_set.add_condition(VolumeSurgeCondition(surge_threshold=3.0))
+            condition_set.add_condition(PriceSurgeCondition())  # Uses PRICE_SURGE_THRESHOLD from conditions.py
+            condition_set.add_condition(VolumeSurgeCondition())  # Uses VOLUME_SURGE_THRESHOLD from conditions.py
             
             self.condition_sets[symbol] = condition_set
     
@@ -261,12 +261,23 @@ class BacktestAlertScanner:
                 # Filter bars for the target date
                 bars_for_date = []
                 for bar in bars:
-                    # Parse date string (format: "20241215 09:30:00" or "20241215")
+                    # Parse date string (format: "20241215 09:30:00" or "20241215" or "20241215 09:30:00 US/Eastern")
                     try:
-                        if len(bar['date']) > 8:  # Has time component
-                            bar_datetime = datetime.strptime(bar['date'], "%Y%m%d %H:%M:%S")
+                        date_str = bar['date']
+                        
+                        # Remove timezone if present (e.g., " US/Eastern")
+                        if ' ' in date_str:
+                            parts = date_str.split()
+                            # Check if last part looks like a timezone (contains '/')
+                            if len(parts) >= 3 and '/' in parts[-1]:
+                                # Has timezone, remove it
+                                date_str = ' '.join(parts[:-1])
+                        
+                        # Now parse the cleaned date string
+                        if len(date_str) > 8:  # Has time component
+                            bar_datetime = datetime.strptime(date_str, "%Y%m%d %H:%M:%S")
                         else:  # Date only
-                            bar_datetime = datetime.strptime(bar['date'], "%Y%m%d")
+                            bar_datetime = datetime.strptime(date_str, "%Y%m%d")
                         
                         # Only include bars from the target date
                         if bar_datetime.date() == self.date.date():
@@ -466,39 +477,36 @@ class BacktestAlertScanner:
 
 # Example usage
 if __name__ == "__main__":
-    from datetime import datetime, timedelta
+    from datetime import datetime
     import time
     
     print("\n" + "="*70)
     print(" "*20 + "BACKTEST ALERT SCANNER")
     print("="*70 + "\n")
     
-    # Connect to TWS
-    tws_app = None
-    use_tws = False
-    
-    if HAS_TWS:
-        print("+-- TWS CONNECTION")
-        print("|   Connecting to TWS/IB Gateway (paper trading - port 7497)...")
-        try:
-            tws_app = create_tws_data_app(host="127.0.0.1", port=7497, client_id=901)
-            if tws_app:
-                print("|   [OK] Connected to TWS")
-                print("|   [OK] Will fetch historical data from IBKR")
-                use_tws = True
-            else:
-                print("|   [WARN] Could not connect to TWS")
-                print("|   [INFO] Will use simulated data instead")
-        except Exception as e:
-            print(f"|   [WARN] TWS Error: {str(e)[:40]}...")
-            print("|   [INFO] Will use simulated data instead")
+    # Connect to TWS - REQUIRED
+    print("+-- TWS CONNECTION")
+    print("|   Connecting to TWS/IB Gateway (paper trading - port 7497)...")
+    try:
+        tws_app = create_tws_data_app(host="127.0.0.1", port=7497, client_id=901)
+        if not tws_app:
+            print("|   [ERROR] Could not connect to TWS")
+            print("|   [INFO] Make sure:")
+            print("|          - TWS/IB Gateway is running")
+            print("|          - API is enabled in TWS settings")
+            print("|          - Port 7497 is correct (paper trading)")
+            print("+" + "-"*68 + "\n")
+            exit(1)
+        print("|   [OK] Connected to TWS")
+    except Exception as e:
+        print(f"|   [ERROR] TWS Error: {str(e)}")
+        print("|   [INFO] Make sure:")
+        print("|          - TWS/IB Gateway is running")
+        print("|          - API is enabled in TWS settings")
+        print("|          - Port 7497 is correct (paper trading)")
         print("+" + "-"*68 + "\n")
-    else:
-        print("+-- TWS NOT AVAILABLE")
-        print("|   [INFO] TWS integration not installed")
-        print("|   [INFO] Install with: pip install ibapi")
-        print("|   [INFO] Will use simulated data")
-        print("+" + "-"*68 + "\n")
+        exit(1)
+    print("+" + "-"*68 + "\n")
     
     # Get user input for symbols
     print("SYMBOLS (up to 5, comma-separated)")
@@ -530,109 +538,32 @@ if __name__ == "__main__":
     print("+-- INITIALIZING SCANNER")
     scanner = BacktestAlertScanner(symbols=symbols, date=date_input)
     print("|   [OK] Scanner initialized")
-    print("|   [OK] Default conditions: Price>VWAP, Price Surge (0.5%), Volume Surge (2x)")
+    print(f"|   [OK] Conditions: Price>VWAP, Price Surge ({PRICE_SURGE_THRESHOLD}%), Volume Surge ({VOLUME_SURGE_THRESHOLD}x)")
+    print("|   [INFO] Configure thresholds in conditions.py (PRICE_SURGE_THRESHOLD, VOLUME_SURGE_THRESHOLD)")
     print("+" + "-"*68)
     
     print("\n[!] ALERT LOGIC: ALL 3 conditions must be TRUE simultaneously:")
     print("    1. Price > VWAP")
-    print("    2. Price surge >= 0.5% in last 10 seconds")
-    print("    3. Volume surge >= 2x in last 10 seconds\n")
+    print(f"    2. Price surge >= {PRICE_SURGE_THRESHOLD}% in last 10 seconds")
+    print(f"    3. Volume surge >= {VOLUME_SURGE_THRESHOLD}x in last 10 seconds\n")
     
-    # Load data from TWS or simulate
-    if use_tws and tws_app:
-        print("[INFO] Fetching historical data from IBKR TWS...\n")
-        data_loaded = scanner.load_data_from_tws(
-            tws_app=tws_app,
-            bar_size="10 secs",  # 10-second bars for surge detection
-            duration="1 D"  # 1 day of data
-        )
-        
-        if not data_loaded:
-            print("\n[WARN] Failed to load data from TWS. Exiting.")
-            print("[INFO] Make sure:")
-            print("       - TWS/IB Gateway is running")
-            print("       - API is enabled in TWS settings")
-            print("       - You have market data subscription for the symbols")
-            print("       - The backtest date has available data\n")
-            tws_app.disconnect()
-            exit(1)
-    else:
-        print("\n[!] NOTE: Using simulated 10-second candle data with random surges.")
-        print("    ~5% of candles will have price surges (0.5-2%) and volume spikes (2-5x).")
-        print("    For real data: Connect to TWS with live market data subscription.\n")
-        
-        # Progress indicator
-        print("\n+-- LOADING SIMULATED DATA")
-        for symbol in symbols:
-            print(f"|   Loading {symbol}...", end=" ")
-            
-            # Use realistic base prices (as of Dec 2025)
-            base_price = {
-                'AAPL': 195, 'MSFT': 425, 'GOOGL': 175, 
-                'TSLA': 350, 'AMZN': 210, 'NVDA': 140,
-                'META': 585, 'NFLX': 850, 'AMD': 145,
-                'YCBD': 1.10, 'THH': 2.50, 'TLRY': 11.50,  # Recent prices
-                'SPY': 590, 'QQQ': 515, 'IWM': 220  # ETFs
-            }.get(symbol, 50)  # Default to $50 for unknown symbols
-            vwap_base = base_price * 0.995
-            
-            # Simulate intraday data with 10-SECOND candles (more realistic for surge detection)
-            candle_count = 0
-            import random
-            random.seed(hash(symbol) % 1000)  # Different but reproducible seed per symbol
-            
-            # Start at 9:30 AM market open
-            current_time = datetime.combine(backtest_date.date(), __import__('datetime').time(9, 30))
-            market_close = datetime.combine(backtest_date.date(), __import__('datetime').time(16, 0))
-            
-            # Track intraday trend (slight upward/downward bias throughout the day)
-            daily_trend = random.uniform(-0.05, 0.15)  # -5% to +15% overall daily movement
-            
-            while current_time < market_close:
-                # Calculate time progression through the day (0.0 to 1.0)
-                seconds_since_open = (current_time - datetime.combine(backtest_date.date(), __import__('datetime').time(9, 30))).total_seconds()
-                day_progress = seconds_since_open / (6.5 * 3600)  # 6.5 hour trading day
-                
-                # Base price drifts gradually with daily trend, oscillates around base
-                trend_component = base_price * daily_trend * day_progress
-                oscillation = base_price * random.uniform(-0.02, 0.02)  # ±2% random oscillation
-                price = base_price + trend_component + oscillation
-                
-                # Normal volume: stay within realistic range
-                base_volume = 1000000 if base_price > 100 else 500000 if base_price > 10 else 100000
-                volume = base_volume * random.uniform(0.5, 1.5)
-                
-                # Occasionally create REAL surge conditions (5% of time)
-                if random.random() < 0.05:
-                    # Price surge: 0.5% to 2% spike above current level
-                    surge_pct = random.uniform(0.005, 0.02)
-                    price = price * (1 + surge_pct)
-                    # Volume spike: 2x to 5x normal volume
-                    volume = volume * random.uniform(2.0, 5.0)
-                
-                # Keep price within reasonable bounds (±20% of base)
-                price = max(base_price * 0.8, min(price, base_price * 1.2))
-                
-                # Calculate VWAP (stays close to base price)
-                vwap = base_price * (0.995 + random.uniform(-0.01, 0.01))
-                
-                scanner.add_data(
-                    symbol,
-                    current_time,
-                    open_price=price * 0.999,
-                    high_price=price * 1.002,
-                    low_price=price * 0.998,
-                    close_price=price,
-                    volume=int(volume),
-                    vwap=vwap
-                )
-                
-                candle_count += 1
-                current_time += timedelta(seconds=10)
-            
-            print(f"[OK] {candle_count} candles")
-        
-        print("+" + "-"*68)
+    # Load data from TWS
+    print("[INFO] Fetching historical data from IBKR TWS...\n")
+    data_loaded = scanner.load_data_from_tws(
+        tws_app=tws_app,
+        bar_size="10 secs",  # 10-second bars for surge detection
+        duration="1 D"  # 1 day of data
+    )
+    
+    if not data_loaded:
+        print("\n[ERROR] Failed to load data from TWS.")
+        print("[INFO] Make sure:")
+        print("       - TWS/IB Gateway is running")
+        print("       - API is enabled in TWS settings")
+        print("       - You have market data subscription for the symbols")
+        print("       - The backtest date has available data\n")
+        tws_app.disconnect()
+        exit(1)
     
     # Run backtest
     alerts = scanner.run_backtest()

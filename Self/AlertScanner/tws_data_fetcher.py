@@ -59,21 +59,39 @@ class TWSDataApp(EClient, EWrapper):
         self.connected = True
         print(f"[TWS] Connected. Next valid order ID: {orderId}")
         
-    def error(self, reqId: int, errorCode: int, errorString: str, advancedOrderRejectJson=""):
-        """Error handler"""
-        # Suppress common info messages
-        if errorCode in [2104, 2106, 2158]:  # Market data farm connection messages
+    def error(self, reqId: int, errorCode: int, errorString: str, advancedOrderRejectJson="", *args):
+        """Error handler - accepts variable arguments for compatibility across ibapi versions"""
+        # Suppress common info/warning messages that don't affect functionality
+        suppressed_codes = [
+            2104, 2106, 2107, 2119, 2158,  # Market data farm connection messages
+            2106,  # HMDS data farm connection
+            2158,  # Sec-def data farm connection
+        ]
+        if errorCode in suppressed_codes:
             return
         if errorCode == 10167:  # Displaying delayed market data
             print(f"[TWS] Using delayed market data (live subscription may be needed)")
             return
-        print(f"[TWS Error] ReqId: {reqId}, Code: {errorCode}, Msg: {errorString}")
+        # Only show actual errors (code >= 500) or important warnings
+        if errorCode >= 500 or errorCode in [1100, 1101, 1102, 1300]:
+            print(f"[TWS Error] ReqId: {reqId}, Code: {errorCode}, Msg: {errorString}")
         
     def historicalData(self, reqId: int, bar: BarData):
         """Receive historical bar data"""
         with self.lock:
             if reqId not in self.historical_data:
                 self.historical_data[reqId] = []
+            
+            # Get VWAP - attribute name varies by ibapi version
+            vwap = 0.0
+            if hasattr(bar, 'average'):
+                vwap = bar.average
+            elif hasattr(bar, 'wap'):
+                vwap = bar.wap
+            else:
+                # Fallback: calculate simple average of high and low
+                vwap = (bar.high + bar.low) / 2.0
+            
             self.historical_data[reqId].append({
                 'date': bar.date,
                 'open': bar.open,
@@ -81,7 +99,7 @@ class TWSDataApp(EClient, EWrapper):
                 'low': bar.low,
                 'close': bar.close,
                 'volume': bar.volume,
-                'average': bar.average,  # VWAP
+                'average': vwap,  # VWAP
                 'barCount': bar.barCount
             })
     

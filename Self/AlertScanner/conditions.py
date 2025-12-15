@@ -2,12 +2,25 @@
 Alert Conditions Module
 Defines base condition class and specific alert conditions for the scanner.
 New conditions can be easily added by extending the AlertCondition class.
+
+CENTRALIZED CONFIGURATION:
+- PRICE_SURGE_THRESHOLD: Percentage change to trigger price surge alert
+- VOLUME_SURGE_THRESHOLD: Volume multiplier to trigger volume surge alert
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, Any
 from datetime import datetime, timedelta
+
+
+# =============================================================================
+# CENTRALIZED ALERT CONFIGURATION
+# Configure these values to adjust alert sensitivity across all scanners
+# =============================================================================
+
+PRICE_SURGE_THRESHOLD = 3.0  # Percentage (e.g., 3.0 = 3% price increase)
+VOLUME_SURGE_THRESHOLD = 5.0  # Multiplier (e.g., 5.0 = 5x volume increase)
 
 
 @dataclass
@@ -64,13 +77,13 @@ class PriceAboveVWAPCondition(AlertCondition):
 class PriceSurgeCondition(AlertCondition):
     """Condition: Huge surge in price in the last 10 seconds"""
     
-    def __init__(self, surge_threshold: float = 2):
+    def __init__(self, surge_threshold: float = None):
         """
         Args:
-            surge_threshold: Percentage increase threshold (default 0.5%)
+            surge_threshold: Percentage increase threshold (uses PRICE_SURGE_THRESHOLD if None)
         """
         super().__init__("Price Surge (Last 10s)")
-        self.surge_threshold = surge_threshold
+        self.surge_threshold = surge_threshold if surge_threshold is not None else PRICE_SURGE_THRESHOLD
         self.lookback_seconds = 10
     
     def check(self, data: MarketData) -> bool:
@@ -113,13 +126,13 @@ class PriceSurgeCondition(AlertCondition):
 class VolumeSurgeCondition(AlertCondition):
     """Condition: Huge surge in volume during the last 10 seconds"""
     
-    def __init__(self, surge_threshold: float = 3.0):
+    def __init__(self, surge_threshold: float = None):
         """
         Args:
-            surge_threshold: Volume multiplier threshold (default 2x)
+            surge_threshold: Volume multiplier threshold (uses VOLUME_SURGE_THRESHOLD if None)
         """
         super().__init__("Volume Surge (Last 10s)")
-        self.surge_threshold = surge_threshold
+        self.surge_threshold = surge_threshold if surge_threshold is not None else VOLUME_SURGE_THRESHOLD
         self.lookback_seconds = 10
     
     def check(self, data: MarketData) -> bool:

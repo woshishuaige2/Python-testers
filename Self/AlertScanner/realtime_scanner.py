@@ -10,6 +10,7 @@ from collections import deque
 import threading
 import time
 import sys
+import signal
 
 from conditions import (
     AlertCondition,
@@ -20,13 +21,12 @@ from conditions import (
     VolumeSurgeCondition
 )
 
-# Try to import TWS integration
+# Import TWS integration - REQUIRED
 try:
     from tws_data_fetcher import create_tws_data_app, TWSDataApp
-    HAS_TWS = True
 except ImportError:
-    HAS_TWS = False
-    print("[WARN] TWS integration not available. Install ibapi: pip install ibapi")
+    print("[ERROR] TWS integration not available. Install ibapi: pip install ibapi")
+    exit(1)
 
 
 class RealtimeSymbolMonitor:
@@ -90,6 +90,35 @@ class RealtimeSymbolMonitor:
                 volume_history=volume_dict
             )
     
+    def get_relative_volume(self) -> float:
+        """Calculate relative volume (current vs average)"""
+        with self.lock:
+            if not self.volume_history or len(self.volume_history) < 2:
+                return 1.0
+            
+            volumes = [vol for _, vol in self.volume_history]
+            if len(volumes) < 2:
+                return 1.0
+            
+            avg_volume = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else volumes[0]
+            if avg_volume == 0:
+                return 1.0
+            
+            return self.last_volume / avg_volume if self.last_volume else 1.0
+    
+    def get_status_summary(self) -> Dict[str, any]:
+        """Get summary of current status for display"""
+        with self.lock:
+            return {
+                'symbol': self.symbol,
+                'price': self.last_price,
+                'volume': self.last_volume,
+                'vwap': self.last_vwap,
+                'rel_volume': self.get_relative_volume(),
+                'last_update': self.last_update,
+                'data_points': len(self.price_history)
+            }
+    
     def check_conditions(self) -> Dict[str, any]:
         """
         Check if alert conditions are met.
@@ -144,6 +173,7 @@ class RealtimeAlertScanner:
         self.alert_callbacks: List[Callable] = []
         self.running = False
         self.lock = threading.Lock()
+        self.update_count = 0  # Track number of updates received
         
         # Initialize monitors with default conditions
         self._initialize_monitors()
@@ -154,8 +184,8 @@ class RealtimeAlertScanner:
             # Create default condition set
             condition_set = AlertConditionSet(f"{symbol}_default")
             condition_set.add_condition(PriceAboveVWAPCondition())
-            condition_set.add_condition(PriceSurgeCondition(surge_threshold=0.5))
-            condition_set.add_condition(VolumeSurgeCondition(surge_threshold=2.0))
+            condition_set.add_condition(PriceSurgeCondition())  # Uses PRICE_SURGE_THRESHOLD from conditions.py
+            condition_set.add_condition(VolumeSurgeCondition())  # Uses VOLUME_SURGE_THRESHOLD from conditions.py
             
             self.monitors[symbol] = RealtimeSymbolMonitor(symbol, condition_set)
     
@@ -185,6 +215,10 @@ class RealtimeAlertScanner:
         
         monitor = self.monitors[symbol]
         monitor.update_market_data(price, volume, vwap)
+        
+        # Increment update counter
+        with self.lock:
+            self.update_count += 1
         
         # Check conditions and trigger alerts
         result = monitor.check_conditions()
@@ -218,13 +252,118 @@ class RealtimeAlertScanner:
         """Get list of monitored symbols"""
         return list(self.monitors.keys())
     
+    def get_all_statuses(self) -> List[Dict]:
+        """Get status summary for all monitored symbols"""
+        statuses = []
+        for symbol in self.symbols:
+            if symbol in self.monitors:
+                statuses.append(self.monitors[symbol].get_status_summary())
+        return statuses
+    
     def stop(self):
         """Stop the scanner"""
         self.running = False
 
 
+def clear_screen():
+    """Clear the console screen - simplified to avoid hanging"""
+    # Just print newlines instead of using os.system which can hang
+    print("\n" * 50)
+
+
+def display_status_table(scanner: RealtimeAlertScanner, alert_info: str = None):
+    """Display a formatted table of all monitored symbols"""
+    # Don't clear screen - just add separator
+    print("\n" + "="*100)
+    
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    print(" "*35 + "REAL-TIME ALERT SCANNER")
+    print("="*100)
+    print(f"Current Time: {current_time} | Updates Received: {scanner.update_count}")
+    print("="*100)
+    
+    # Table header
+    print(f"\n{'SYMBOL':<8} {'PRICE':<12} {'VOLUME':<15} {'REL VOL':<10} {'VWAP':<12} {'LAST UPDATE':<20}")
+    print("-"*100)
+    
+    # Directly access monitors to avoid lock contention
+    for symbol in scanner.symbols:
+        if symbol in scanner.monitors:
+            monitor = scanner.monitors[symbol]
+            
+            # Get data without locking for too long
+            try:
+                price = monitor.last_price
+                volume = monitor.last_volume
+                vwap = monitor.last_vwap
+                last_update = monitor.last_update
+                
+                # Calculate relative volume safely
+                rel_vol = 1.0
+                if len(monitor.volume_history) >= 2:
+                    volumes = [vol for _, vol in list(monitor.volume_history)]
+                    if len(volumes) > 1:
+                        # Average of all volumes except the latest
+                        avg_volume = sum(volumes[:-1]) / len(volumes[:-1])
+                        if avg_volume > 0 and volume:
+                            rel_vol = volume / avg_volume
+                
+                if price is None or price == 0:
+                    price_str = "Waiting..."
+                    volume_str = "--"
+                    rel_vol_str = "--"
+                    vwap_str = "--"
+                    update_str = "No data"
+                else:
+                    price_str = f"${price:,.2f}"
+                    volume_str = f"{volume:,}" if volume else "0"
+                    rel_vol_str = f"{rel_vol:.2f}x" if rel_vol > 0 else "1.00x"
+                    vwap_str = f"${vwap:,.2f}" if vwap else "--"
+                    update_str = last_update.strftime("%H:%M:%S") if last_update else "N/A"
+                
+                print(f"{symbol:<8} {price_str:<12} {volume_str:<15} {rel_vol_str:<10} {vwap_str:<12} {update_str:<20}")
+            except Exception as e:
+                print(f"{symbol:<8} ERROR: {str(e)[:50]}")
+    
+    print("-"*100)
+    
+    # Show alert info if present
+    if alert_info:
+        print("\n" + "!"*100)
+        print("🚨 ALERT TRIGGERED 🚨")
+        print("!"*100)
+        print(alert_info)
+        print("!"*100)
+    
+    print("\n[INFO] Table updates every 5 seconds | Press Ctrl+C to stop\n")
+
+
 # Example usage
 if __name__ == "__main__":
+    # Global variable to track if we should exit
+    should_exit = False
+    tws_app_global = None
+    
+    def signal_handler(sig, frame):
+        """Handle Ctrl+C gracefully"""
+        global should_exit, tws_app_global
+        should_exit = True
+        print("\n\n" + "="*60)
+        print("[INFO] Shutting down scanner...")
+        if tws_app_global:
+            try:
+                tws_app_global.disconnect()
+                print("[TWS] Disconnected")
+            except:
+                pass
+        print("[INFO] Scanner stopped")
+        print("="*60 + "\n")
+        sys.exit(0)
+    
+    # Register signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    
     print("\n" + "="*60)
     print("REAL-TIME ALERT SCANNER")
     print("="*60)
@@ -244,98 +383,112 @@ if __name__ == "__main__":
     
     print(f"✓ Symbols: {', '.join(symbols)}")
     
-    # Choose between simulation and TWS
-    if HAS_TWS:
-        print("\nOptions:")
-        print("  1. Connect to TWS (live market data)")
-        print("  2. Simulation mode (demo data)")
-        choice = input("Select (1 or 2): ").strip()
-    else:
-        choice = "2"
-        print("\n⚠️  TWS integration not available. Using simulation mode.")
-    
     # Create scanner
     scanner = RealtimeAlertScanner(symbols=symbols)
     
-    # Optional: Add custom callback
-    def my_alert_handler(symbol, timestamp, reasons, data):
-        print(f"\n>>> CUSTOM HANDLER for {symbol} at {timestamp}")
-        print(f"    Reasons: {reasons}\n")
+    # Track last alert for display
+    last_alert_info = {'message': None, 'triggered': False}
     
-    scanner.on_alert(my_alert_handler)
+    # Alert handler that captures alert info
+    def alert_handler(symbol, timestamp, reasons, data):
+        alert_msg = (
+            f"Symbol: {symbol}\n"
+            f"Time: {timestamp}\n"
+            f"Price: ${data.price:.2f} | Volume: {data.volume:,} | VWAP: ${data.vwap:.2f}\n"
+            f"Conditions: {reasons}"
+        )
+        last_alert_info['message'] = alert_msg
+        last_alert_info['triggered'] = True
     
-    if choice == "1" and HAS_TWS:
-        # Connect to TWS
-        print("\nConnecting to TWS...")
-        print("Make sure TWS or IB Gateway is running with API enabled!")
-        print("Using paper trading port 7497\n")
-        
+    scanner.on_alert(alert_handler)
+    
+    # Connect to TWS
+    print("\n+-- TWS CONNECTION")
+    print("|   Connecting to TWS/IB Gateway (paper trading - port 7497)...")
+    print("|   Make sure TWS or IB Gateway is running with API enabled!")
+    
+    try:
         tws_app = create_tws_data_app(host="127.0.0.1", port=7497, client_id=902)
+        tws_app_global = tws_app  # Store for signal handler
         
-        if tws_app is None:
-            print("❌ Failed to connect to TWS. Exiting.")
+        if not tws_app:
+            print("|   [ERROR] Could not connect to TWS")
+            print("|   [INFO] Make sure:")
+            print("|          - TWS/IB Gateway is running")
+            print("|          - API is enabled in TWS settings")
+            print("|          - Port 7497 is correct (paper trading)")
+            print("+" + "-"*68 + "\n")
             exit(1)
         
-        print("✓ Connected to TWS\n")
-        
-        # Create callback for each symbol
-        def create_tws_callback(scanner_obj, symbol):
-            def callback(sym, price, volume, vwap, timestamp):
-                """Callback receives: symbol, price, volume, vwap, timestamp"""
-                scanner_obj.update(sym, price=price, volume=volume, vwap=vwap)
-            
-            return callback
-        
-        # Subscribe to market data for all symbols
-        for symbol in symbols:
-            callback = create_tws_callback(scanner, symbol)
-            tws_app.subscribe_realtime_data(symbol, callback)
-        
-        print(f"Subscribed to live market data for: {', '.join(symbols)}")
-        print("Listening for alerts (Ctrl+C to stop)...\n")
-        
-        try:
-            # Keep running
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n\nStopping scanner...")
-            tws_app.disconnect()
-            print("Disconnected from TWS")
+        print("|   [OK] Connected to TWS")
+    except Exception as e:
+        print(f"|   [ERROR] TWS Error: {str(e)}")
+        print("|   [INFO] Make sure:")
+        print("|          - TWS/IB Gateway is running")
+        print("|          - API is enabled in TWS settings")
+        print("|          - Port 7497 is correct (paper trading)")
+        print("+" + "-"*68 + "\n")
+        exit(1)
     
-    else:
-        # Simulation mode
-        import random
+    print("+" + "-"*68 + "\n")
+    
+    # Create callback for each symbol
+    def create_tws_callback(scanner_obj, symbol):
+        def callback(sym, price, volume, vwap, timestamp):
+            """Callback receives: symbol, price, volume, vwap, timestamp"""
+            # Debug: Print first few updates to confirm data is being received
+            if scanner_obj.update_count < 10:
+                print(f"[DEBUG {scanner_obj.update_count + 1}] {sym} | Price: ${price:.2f} | Vol: {volume:,} | VWAP: ${vwap:.2f}")
+            scanner_obj.update(sym, price=price, volume=volume, vwap=vwap)
         
-        print("Starting real-time scanner in SIMULATION mode...\n")
-        print("Simulating price and volume movements...")
-        print("Listening for alerts (Ctrl+C to stop)...\n")
+        return callback
+    
+    # Subscribe to market data for all symbols
+    print("[INFO] Subscribing to live market data...")
+    for symbol in symbols:
+        callback = create_tws_callback(scanner, symbol)
+        tws_app.subscribe_realtime_data(symbol, callback)
+        print(f"[OK] Subscribed to {symbol}")
+    
+    print(f"\n[OK] All symbols subscribed: {', '.join(symbols)}")
+    print("[INFO] Waiting for initial data (10 seconds)...")
+    print("[INFO] You should see [DEBUG] messages below if data is flowing...\n")
+    
+    time.sleep(10)  # Wait longer for initial data
+    
+    print(f"\n[INFO] Updates received so far: {scanner.update_count}")
+    if scanner.update_count == 0:
+        print("[WARN] No data received yet. Continuing to wait...")
+    print("[INFO] Starting continuous monitoring...")
+    print("[INFO] Press Ctrl+C to stop\n")
+    
+    # Display initial table
+    display_status_table(scanner)
+    
+    last_table_update = time.time()
+    table_update_interval = 5  # Update table every 5 seconds
+    
+    # Keep running continuously
+    while not should_exit:
+        time.sleep(0.5)  # Check frequently
         
-        iteration = 0
-        try:
-            while True:
-                iteration += 1
-                
-                # Simulate price and volume movements
-                for symbol in scanner.get_monitored_symbols():
-                    base_price = {
-                        'AAPL': 150, 'MSFT': 330, 'GOOGL': 140,
-                        'TSLA': 250, 'AMZN': 170, 'NVDA': 875
-                    }.get(symbol, 100)
-                    vwap = base_price * (0.98 + random.uniform(0, 0.03))
-                    
-                    # Occasionally create surge conditions (30% chance)
-                    if random.random() < 0.3:
-                        price = base_price * (1.01 + random.uniform(0, 0.02))
-                        volume = random.randint(2000000, 5000000)
-                    else:
-                        price = base_price * (0.99 + random.uniform(0, 0.01))
-                        volume = random.randint(500000, 1000000)
-                    
-                    scanner.update(symbol, price=price, volume=volume, vwap=vwap)
-                
-                time.sleep(1)
+        current_time = time.time()
         
-        except KeyboardInterrupt:
-            print("\n\nScanner stopped by user")
-            print(f"Ran for {iteration} iterations")
+        # Update table if: 1) interval passed, or 2) alert was triggered
+        if (current_time - last_table_update >= table_update_interval) or last_alert_info['triggered']:
+            if should_exit:
+                break
+            alert_msg = last_alert_info['message'] if last_alert_info['triggered'] else None
+            display_status_table(scanner, alert_msg)
+            last_table_update = current_time
+            
+            # Reset alert flag after displaying
+            if last_alert_info['triggered']:
+                last_alert_info['triggered'] = False
+                # Keep message for a bit longer
+                time.sleep(2)
+    
+    # Cleanup on exit
+    if tws_app:
+        tws_app.disconnect()
+    print("\n[INFO] Scanner terminated\n")
