@@ -4,7 +4,7 @@ Backtests alert conditions against historical data for a specific date.
 
 WORKFLOW:
 1. User inputs symbols (up to 5) and target date
-2. Scanner initializes with default conditions (Price>VWAP, Price Surge, Volume Surge)
+2. Scanner initializes with default conditions (Price>VWAP, Price Surge)
 3. Historical OHLCV data is loaded from IBKR TWS
 4. For each candle, scanner checks if ALL conditions are met
 5. When all conditions trigger, an alert is recorded with timestamp and details
@@ -27,9 +27,8 @@ from conditions import (
     MarketData,
     PriceAboveVWAPCondition,
     PriceSurgeCondition,
-    VolumeSurgeCondition,
-    PRICE_SURGE_THRESHOLD,
-    VOLUME_SURGE_THRESHOLD
+    VolumeSpike10sCondition,
+    PRICE_SURGE_THRESHOLD
 )
 
 # Import TWS integration - REQUIRED
@@ -171,7 +170,7 @@ class BacktestAlertScanner:
             condition_set = AlertConditionSet(f"{symbol}_backtest")
             condition_set.add_condition(PriceAboveVWAPCondition())
             condition_set.add_condition(PriceSurgeCondition())  # Uses PRICE_SURGE_THRESHOLD from conditions.py
-            condition_set.add_condition(VolumeSurgeCondition())  # Uses VOLUME_SURGE_THRESHOLD from conditions.py
+            condition_set.add_condition(VolumeSpike10sCondition())  # 10s volume > 5x avg of past 20 bars
             
             self.condition_sets[symbol] = condition_set
     
@@ -538,14 +537,14 @@ if __name__ == "__main__":
     print("+-- INITIALIZING SCANNER")
     scanner = BacktestAlertScanner(symbols=symbols, date=date_input)
     print("|   [OK] Scanner initialized")
-    print(f"|   [OK] Conditions: Price>VWAP, Price Surge ({PRICE_SURGE_THRESHOLD}%), Volume Surge ({VOLUME_SURGE_THRESHOLD}x)")
-    print("|   [INFO] Configure thresholds in conditions.py (PRICE_SURGE_THRESHOLD, VOLUME_SURGE_THRESHOLD)")
+    print(f"|   [OK] Conditions: Price>VWAP, Price Surge ({PRICE_SURGE_THRESHOLD}%), Volume Spike (5x)")
+    print(f"|   [INFO] Configure thresholds in conditions.py")
     print("+" + "-"*68)
     
     print("\n[!] ALERT LOGIC: ALL 3 conditions must be TRUE simultaneously:")
     print("    1. Price > VWAP")
     print(f"    2. Price surge >= {PRICE_SURGE_THRESHOLD}% in last 10 seconds")
-    print(f"    3. Volume surge >= {VOLUME_SURGE_THRESHOLD}x in last 10 seconds\n")
+    print(f"    3. Volume spike: current 10s > 5x average of past 20 bars\n")
     
     # Load data from TWS
     print("[INFO] Fetching historical data from IBKR TWS...\n")

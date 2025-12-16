@@ -18,7 +18,7 @@ from conditions import (
     MarketData,
     PriceAboveVWAPCondition,
     PriceSurgeCondition,
-    VolumeSurgeCondition
+    VolumeSpike10sCondition
 )
 
 # Import TWS integration - REQUIRED
@@ -47,9 +47,15 @@ class RealtimeSymbolMonitor:
         # Data tracking
         self.price_history = deque(maxlen=max_history_size)
         self.volume_history = deque(maxlen=max_history_size)
+        
+        # Cumulative VWAP tracking (like Webull)
+        self.cumulative_pv = 0.0  # Sum of (price * volume)
+        self.cumulative_volume = 0.0  # Sum of volume
+        
         self.last_price = None
-        self.last_volume = None
-        self.last_vwap = None
+        self.last_volume = None  # Cumulative daily volume
+        self.last_vwap = None  # Cumulative day VWAP
+        self.last_bar_volume = None  # Last bar's incremental volume
         self.last_update = None
         self.lock = threading.Lock()
         
@@ -57,18 +63,79 @@ class RealtimeSymbolMonitor:
         self.last_alert_time = None
         self.alert_cooldown_seconds = 5  # Prevent duplicate alerts
     
-    def update_market_data(self, price: float, volume: int, vwap: float):
+    def update_market_data(self, price: float, volume: int, vwap: float = None):
         """Update market data for this symbol"""
         with self.lock:
             timestamp = datetime.now()
             
+            # Convert to float (TWS returns Decimal types)
+            price = float(price)
+            volume = float(volume)
+            
+            # For tick-by-tick updates, volume is cumulative daily volume
+            # Calculate incremental volume for this update
+            if self.last_volume is not None:
+                volume_increment = volume - self.last_volume
+            else:
+                volume_increment = volume
+            
+            # Update cumulative VWAP (like Webull)
+            if volume_increment > 0:
+                self.cumulative_pv += price * volume_increment
+                self.cumulative_volume += volume_increment
+                if self.cumulative_volume > 0:
+                    self.last_vwap = self.cumulative_pv / self.cumulative_volume
+            
             self.price_history.append((timestamp, price))
-            self.volume_history.append((timestamp, volume))
+            self.volume_history.append((timestamp, volume_increment))
             
             self.last_price = price
-            self.last_volume = volume
-            self.last_vwap = vwap
+            self.last_volume = volume  # Store cumulative volume
+            self.last_bar_volume = volume_increment  # Store this bar's volume
             self.last_update = timestamp
+    
+    def load_historical_intraday(self, bars: list):
+        """Load historical intraday bars to establish baseline for cumulative VWAP"""
+        with self.lock:
+            for bar in bars:
+                # Parse date string (format: "20241215 09:30:00" or with timezone)
+                date_str = bar['date']
+                
+                # Remove timezone if present (e.g., " US/Eastern")
+                if ' ' in date_str:
+                    parts = date_str.split()
+                    # Check if last part looks like a timezone (contains '/')
+                    if len(parts) >= 3 and '/' in parts[-1]:
+                        # Has timezone, remove it
+                        date_str = ' '.join(parts[:-1])
+                
+                # Parse the cleaned date string
+                if len(date_str) > 8:  # Has time component
+                    timestamp = datetime.strptime(date_str, "%Y%m%d %H:%M:%S")
+                else:  # Date only
+                    timestamp = datetime.strptime(date_str, "%Y%m%d")
+                
+                price = float(bar['close'])
+                volume = float(bar['volume'])
+                # Note: bar['average'] is per-bar VWAP, we calculate cumulative ourselves
+                
+                # Update cumulative VWAP calculation
+                self.cumulative_pv += price * volume
+                self.cumulative_volume += volume
+                
+                self.price_history.append((timestamp, price))
+                self.volume_history.append((timestamp, volume))
+                
+                # Keep updating with latest data
+                self.last_price = price
+                self.last_bar_volume = volume
+                self.last_update = timestamp
+            
+            # Calculate cumulative VWAP from all historical bars
+            if self.cumulative_volume > 0:
+                self.last_vwap = self.cumulative_pv / self.cumulative_volume
+                # Set initial cumulative volume for live updates
+                self.last_volume = self.cumulative_volume
     
     def get_market_data(self) -> Optional[MarketData]:
         """Get current market data as MarketData object"""
@@ -90,21 +157,39 @@ class RealtimeSymbolMonitor:
                 volume_history=volume_dict
             )
     
-    def get_relative_volume(self) -> float:
-        """Calculate relative volume (current vs average)"""
+    def get_volume_spike_ratio(self) -> float:
+        """Calculate volume spike ratio (current 10s vs avg of past 20 bars)"""
         with self.lock:
-            if not self.volume_history or len(self.volume_history) < 2:
-                return 1.0
+            if not self.volume_history or len(self.volume_history) < 50:
+                return 0.0
             
-            volumes = [vol for _, vol in self.volume_history]
-            if len(volumes) < 2:
-                return 1.0
+            now = datetime.now()
             
-            avg_volume = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes) > 1 else volumes[0]
-            if avg_volume == 0:
-                return 1.0
+            # Get volume in last 10 seconds (current window)
+            current_10s_vol = sum(
+                vol for ts, vol in self.volume_history
+                if (now - ts).total_seconds() <= 10
+            )
             
-            return self.last_volume / avg_volume if self.last_volume else 1.0
+            # Get volumes from 10-210 seconds ago (20 bars of 10s each)
+            past_volumes = []
+            for i in range(20):
+                start_offset = 10 + (i * 10)  # Start at 10s ago, then 20s, 30s, etc.
+                end_offset = start_offset + 10
+                
+                window_vol = sum(
+                    vol for ts, vol in self.volume_history
+                    if start_offset <= (now - ts).total_seconds() < end_offset
+                )
+                past_volumes.append(window_vol)
+            
+            # Calculate average of past 20 windows
+            past_20_avg = sum(past_volumes) / 20 if past_volumes else 0
+            
+            if past_20_avg == 0:
+                return 0.0
+            
+            return current_10s_vol / past_20_avg if current_10s_vol > 0 else 0.0
     
     def get_status_summary(self) -> Dict[str, any]:
         """Get summary of current status for display"""
@@ -114,7 +199,7 @@ class RealtimeSymbolMonitor:
                 'price': self.last_price,
                 'volume': self.last_volume,
                 'vwap': self.last_vwap,
-                'rel_volume': self.get_relative_volume(),
+                'vol_spike': self.get_volume_spike_ratio(),
                 'last_update': self.last_update,
                 'data_points': len(self.price_history)
             }
@@ -185,9 +270,44 @@ class RealtimeAlertScanner:
             condition_set = AlertConditionSet(f"{symbol}_default")
             condition_set.add_condition(PriceAboveVWAPCondition())
             condition_set.add_condition(PriceSurgeCondition())  # Uses PRICE_SURGE_THRESHOLD from conditions.py
-            condition_set.add_condition(VolumeSurgeCondition())  # Uses VOLUME_SURGE_THRESHOLD from conditions.py
+            condition_set.add_condition(VolumeSpike10sCondition())  # 10s volume > 5x avg of past 20 bars
             
             self.monitors[symbol] = RealtimeSymbolMonitor(symbol, condition_set)
+    
+    def load_today_historical_bars(self, tws_app, bar_size: str = "5 mins"):
+        """
+        Load today's historical intraday bars for all symbols to establish baseline.
+        
+        This fetches all bars from market open (9:30 AM) to now, providing:
+        - Accurate cumulative VWAP calculations
+        
+        Args:
+            tws_app: Connected TWSDataFetcher instance
+            bar_size: Bar size to fetch (e.g., "1 min", "5 mins")
+        """
+        print("\n📊 Loading today's historical data for baseline calculations...")
+        
+        for symbol in self.symbols:
+            print(f"  Fetching {symbol}...", end='', flush=True)
+            
+            # Fetch today's bars (from market open to now)
+            # Note: useRTH=1 is hardcoded in tws_data_fetcher to only get regular trading hours
+            bars = tws_app.fetch_historical_bars(
+                symbol=symbol,
+                end_date=datetime.now(),  # Up to current time
+                duration="1 D",           # Today's data
+                bar_size=bar_size,        # 5-min bars
+                what_to_show="TRADES"     # Trade data
+            )
+            
+            if bars:
+                monitor = self.monitors[symbol]
+                monitor.load_historical_intraday(bars)
+                print(f" ✓ {len(bars)} bars loaded")
+            else:
+                print(" ⚠ No data available")
+        
+        print("✓ Historical baseline established\n")
     
     def set_conditions(self, symbol: str, condition_set: AlertConditionSet):
         """Override conditions for a specific symbol"""
@@ -274,18 +394,18 @@ def clear_screen():
 def display_status_table(scanner: RealtimeAlertScanner, alert_info: str = None):
     """Display a formatted table of all monitored symbols"""
     # Don't clear screen - just add separator
-    print("\n" + "="*100)
+    print("\n" + "="*105)
     
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    print(" "*35 + "REAL-TIME ALERT SCANNER")
-    print("="*100)
+    print(" "*40 + "REAL-TIME ALERT SCANNER")
+    print("="*105)
     print(f"Current Time: {current_time} | Updates Received: {scanner.update_count}")
-    print("="*100)
+    print("="*105)
     
     # Table header
-    print(f"\n{'SYMBOL':<8} {'PRICE':<12} {'VOLUME':<15} {'REL VOL':<10} {'VWAP':<12} {'LAST UPDATE':<20}")
-    print("-"*100)
+    print(f"\n{'SYMBOL':<8} {'PRICE':<12} {'VOLUME':<15} {'VWAP':<12} {'VOL SPIKE':<12} {'LAST UPDATE':<20}")
+    print("-"*105)
     
     # Directly access monitors to avoid lock contention
     for symbol in scanner.symbols:
@@ -298,43 +418,34 @@ def display_status_table(scanner: RealtimeAlertScanner, alert_info: str = None):
                 volume = monitor.last_volume
                 vwap = monitor.last_vwap
                 last_update = monitor.last_update
-                
-                # Calculate relative volume safely
-                rel_vol = 1.0
-                if len(monitor.volume_history) >= 2:
-                    volumes = [vol for _, vol in list(monitor.volume_history)]
-                    if len(volumes) > 1:
-                        # Average of all volumes except the latest
-                        avg_volume = sum(volumes[:-1]) / len(volumes[:-1])
-                        if avg_volume > 0 and volume:
-                            rel_vol = volume / avg_volume
+                vol_spike = monitor.get_volume_spike_ratio()
                 
                 if price is None or price == 0:
                     price_str = "Waiting..."
                     volume_str = "--"
-                    rel_vol_str = "--"
                     vwap_str = "--"
+                    vol_spike_str = "--"
                     update_str = "No data"
                 else:
                     price_str = f"${price:,.2f}"
                     volume_str = f"{volume:,}" if volume else "0"
-                    rel_vol_str = f"{rel_vol:.2f}x" if rel_vol > 0 else "1.00x"
                     vwap_str = f"${vwap:,.2f}" if vwap else "--"
+                    vol_spike_str = f"{vol_spike:.2f}x" if vol_spike > 0 else "--"
                     update_str = last_update.strftime("%H:%M:%S") if last_update else "N/A"
                 
-                print(f"{symbol:<8} {price_str:<12} {volume_str:<15} {rel_vol_str:<10} {vwap_str:<12} {update_str:<20}")
+                print(f"{symbol:<8} {price_str:<12} {volume_str:<15} {vwap_str:<12} {vol_spike_str:<12} {update_str:<20}")
             except Exception as e:
                 print(f"{symbol:<8} ERROR: {str(e)[:50]}")
     
-    print("-"*100)
+    print("-"*105)
     
     # Show alert info if present
     if alert_info:
-        print("\n" + "!"*100)
+        print("\n" + "!"*105)
         print("🚨 ALERT TRIGGERED 🚨")
-        print("!"*100)
+        print("!"*105)
         print(alert_info)
-        print("!"*100)
+        print("!"*105)
     
     print("\n[INFO] Table updates every 5 seconds | Press Ctrl+C to stop\n")
 
@@ -431,6 +542,9 @@ if __name__ == "__main__":
         exit(1)
     
     print("+" + "-"*68 + "\n")
+    
+    # Load today's historical bars for baseline calculations
+    scanner.load_today_historical_bars(tws_app, bar_size="5 mins")
     
     # Create callback for each symbol
     def create_tws_callback(scanner_obj, symbol):

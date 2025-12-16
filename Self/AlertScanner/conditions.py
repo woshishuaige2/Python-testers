@@ -5,7 +5,6 @@ New conditions can be easily added by extending the AlertCondition class.
 
 CENTRALIZED CONFIGURATION:
 - PRICE_SURGE_THRESHOLD: Percentage change to trigger price surge alert
-- VOLUME_SURGE_THRESHOLD: Volume multiplier to trigger volume surge alert
 """
 
 from abc import ABC, abstractmethod
@@ -20,7 +19,7 @@ from datetime import datetime, timedelta
 # =============================================================================
 
 PRICE_SURGE_THRESHOLD = 3.0  # Percentage (e.g., 3.0 = 3% price increase)
-VOLUME_SURGE_THRESHOLD = 5.0  # Multiplier (e.g., 5.0 = 5x volume increase)
+VOLUME_SURGE_THRESHOLD = 5.0
 
 
 @dataclass
@@ -116,6 +115,76 @@ class PriceSurgeCondition(AlertCondition):
             self.triggered_reason = (
                 f"Price surged {pct_change:.2f}% in last 10s "
                 f"(${min_price:.2f} -> ${data.price:.2f})"
+            )
+            return True
+        
+        self.triggered_reason = ""
+        return False
+
+
+class VolumeSpike10sCondition(AlertCondition):
+    """Condition: Current 10s volume > 5x average of past twenty 10s bars"""
+    
+    def __init__(self, spike_threshold: float = VOLUME_SURGE_THRESHOLD):
+        """
+        Args:
+            spike_threshold: Volume multiplier threshold (default 5.0 = 5x)
+        """
+        super().__init__("Volume Spike (10s vs 20 bars)")
+        self.spike_threshold = spike_threshold
+    
+    def check(self, data: MarketData) -> bool:
+        if not data.volume_history or len(data.volume_history) < 21:
+            self.triggered_reason = ""
+            return False
+        
+        now = data.timestamp
+        
+        # Group volumes into 10-second windows
+        ten_sec_windows = []
+        sorted_times = sorted(data.volume_history.keys())
+        
+        current_window_start = None
+        current_window_vol = 0
+        
+        for ts in sorted_times:
+            vol = data.volume_history[ts]
+            
+            if current_window_start is None:
+                current_window_start = ts
+                current_window_vol = vol
+            elif (ts - current_window_start).total_seconds() <= 10:
+                current_window_vol += vol
+            else:
+                # Close current window and start new one
+                ten_sec_windows.append(current_window_vol)
+                current_window_start = ts
+                current_window_vol = vol
+        
+        # Add the last window
+        if current_window_vol > 0:
+            ten_sec_windows.append(current_window_vol)
+        
+        # Need at least 21 windows (20 past + 1 current)
+        if len(ten_sec_windows) < 21:
+            self.triggered_reason = ""
+            return False
+        
+        # Current 10s volume (most recent window)
+        current_10s_vol = ten_sec_windows[-1]
+        
+        # Average of past 20 windows
+        past_20_avg = sum(ten_sec_windows[-21:-1]) / 20
+        
+        if past_20_avg == 0:
+            self.triggered_reason = ""
+            return False
+        
+        ratio = current_10s_vol / past_20_avg
+        
+        if ratio >= self.spike_threshold:
+            self.triggered_reason = (
+                f"10s volume spike {ratio:.1f}x (current: {current_10s_vol:.0f} vs avg: {past_20_avg:.0f})"
             )
             return True
         
